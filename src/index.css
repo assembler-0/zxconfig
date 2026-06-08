@@ -1,0 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@300;400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-mono: "JetBrains Mono", "Space Mono", ui-monospace, monospace;
+  --font-sans: "Space Mono", ui-sans-serif, system-ui;
+}
+
+body {
+  font-family: var(--font-sans);
+  background-color: #fafafa;
+  color: #000000;
+  overflow: hidden; /* Desktop window environment doesn't scroll globally, only inside windows */
+}
+
+/* Custom scrollbars for a retro tech design */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #ffffff;
+  border-left: 1px solid #000000;
+}
+::-webkit-scrollbar-thumb {
+  background: #000000;
+}
+::-webkit-scrollbar-corner {
+  background: #ffffff;
+}
+

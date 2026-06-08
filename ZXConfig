@@ -1,0 +1,10 @@
+# ZXConfig default template
+
+generate c "include/asas";
+
+feature Option1 {
+    type: bool;
+    label: "Test option 1";
+    description: "";
+    default: true;
+}

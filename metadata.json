@@ -1,0 +1,6 @@
+{
+  "name": "ZXConfig",
+  "description": "A minimalist, web-based configuration system with a custom modern configuration language, active parser, AST evaluator, multiple export generators, and a window-based monochrome UI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
