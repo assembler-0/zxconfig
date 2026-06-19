@@ -1,9 +1,16 @@
 {
-  "name": "zxconfig",
+  "name": "@assembler-0/zxconfig",
   "version": "0.1.0",
   "description": "Web-based Kconfig-like configuration engine for ZXConfig files",
   "license": "Apache-2.0",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/assembler-0/ZXconfig.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "bin": {
     "zxconfig": "./bin/zxconfig.js"
   },

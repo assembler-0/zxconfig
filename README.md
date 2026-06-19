@@ -13,19 +13,19 @@ Run it in any project that has a `ZXConfig` file in the root. The UI reads and w
 **One-off (no install):**
 
 ```bash
-npx zxconfig
+npx @assembler-0/zxconfig
 ```
 
 **Global CLI:**
 
 ```bash
-npm install -g zxconfig
+npm install -g @assembler-0/zxconfig
 ```
 
 **Project dev dependency:**
 
 ```bash
-npm install --save-dev zxconfig
+npm install --save-dev @assembler-0/zxconfig
 ```
 
 Then add a script to `package.json`:
@@ -67,7 +67,7 @@ Examples:
 ```bash
 zxconfig --open
 zxconfig --port 8080 --dir ./firmware
-npx zxconfig -C . -o
+npx @assembler-0/zxconfig -C . -o
 ```
 
 ## Project files
@@ -112,10 +112,10 @@ npm run clean   # Remove dist/
 Maintainers: bump `version` in `package.json`, then either:
 
 ```bash
-npm publish --access public
+npm publish
 ```
 
-or create a GitHub Release (tag `v*`) to trigger the publish workflow (requires `NPM_TOKEN` in repo secrets).
+or create a GitHub Release (tag `v*`) to trigger the publish workflow (requires `NPM_TOKEN` in repo secrets). The package is published as `@assembler-0/zxconfig` (public scoped package).
 
 ## License
 
