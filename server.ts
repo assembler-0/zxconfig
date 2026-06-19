@@ -7,18 +7,21 @@ import express from "express";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import { exec } from "child_process";
+import { fileURLToPath } from "url";
 import { createServer as createViteServer } from "vite";
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+export interface ServerOptions {
+  /** Directory containing ZXConfig and .zxdsl files */
+  projectRoot?: string;
+  /** Directory with the built frontend (production only) */
+  assetsPath?: string;
+  port?: number;
+  host?: string;
+  open?: boolean;
+}
 
-  app.use(express.json());
-
-  const zxConfigPath = path.join(process.cwd(), "ZXConfig");
-  const zxValuesPath = path.join(process.cwd(), "ZXConfig.values");
-
-  const defaultSchema = `# ZXConfig default template
+const defaultSchema = `# ZXConfig default template
 
 feature Option1 {
     type: bool;
@@ -27,6 +30,37 @@ feature Option1 {
     default: true;
 }
 `;
+
+function resolvePackageRoot(): string {
+  const serverDir = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(serverDir, "..");
+}
+
+function defaultAssetsPath(): string {
+  return path.join(resolvePackageRoot(), "dist", "client");
+}
+
+function openBrowser(url: string): void {
+  const command =
+    process.platform === "darwin"
+      ? "open"
+      : process.platform === "win32"
+        ? "start"
+        : "xdg-open";
+  exec(`${command} ${JSON.stringify(url)}`);
+}
+
+export async function startServer(options: ServerOptions = {}) {
+  const app = express();
+  const projectRoot = path.resolve(options.projectRoot ?? process.cwd());
+  const port = options.port ?? 3000;
+  const host = options.host ?? "0.0.0.0";
+  const isProduction = process.env.NODE_ENV === "production";
+
+  app.use(express.json());
+
+  const zxConfigPath = path.join(projectRoot, "ZXConfig");
+  const zxValuesPath = path.join(projectRoot, "ZXConfig.values");
 
   // API: Get live core system dump
   app.get("/api/sysdump", (req, res) => {
@@ -44,7 +78,7 @@ feature Option1 {
         cpuModel: cpus.length > 0 ? cpus[0].model : "Unknown CPU",
         cpuThreads: cpus.length,
         uptime: os.uptime(),
-        cwd: process.cwd(),
+        cwd: projectRoot,
         pid: process.pid,
         env: process.env.NODE_ENV || "development",
       };
@@ -91,7 +125,6 @@ feature Option1 {
   app.get("/api/files", (req, res) => {
     try {
       const files: Record<string, string> = {};
-      // Ensure ZXConfig exists
       if (fs.existsSync(zxConfigPath)) {
         files["ZXConfig"] = fs.readFileSync(zxConfigPath, "utf-8");
       } else {
@@ -99,11 +132,11 @@ feature Option1 {
         fs.writeFileSync(zxConfigPath, defaultSchema, "utf-8");
       }
 
-      const items = fs.readdirSync(process.cwd());
+      const items = fs.readdirSync(projectRoot);
       for (const item of items) {
         if (item.endsWith(".zxdsl")) {
           files[item] = fs.readFileSync(
-            path.join(process.cwd(), item),
+            path.join(projectRoot, item),
             "utf-8",
           );
         }
@@ -132,7 +165,7 @@ feature Option1 {
           .json({ error: "Illegal characters detected in filename." });
       }
 
-      const targetPath = path.join(process.cwd(), filename);
+      const targetPath = path.join(projectRoot, filename);
       fs.writeFileSync(targetPath, content, "utf-8");
       return res.json({ success: true });
     } catch (err: any) {
@@ -153,7 +186,7 @@ feature Option1 {
           .json({ error: "The primary 'ZXConfig' file cannot be deleted." });
       }
 
-      const targetPath = path.join(process.cwd(), filename);
+      const targetPath = path.join(projectRoot, filename);
       if (fs.existsSync(targetPath)) {
         fs.unlinkSync(targetPath);
       }
@@ -177,7 +210,7 @@ feature Option1 {
       for (const file of files) {
         if (!file.path || typeof file.content !== "string") continue;
 
-        const absolutePath = path.resolve(process.cwd(), file.path);
+        const absolutePath = path.resolve(projectRoot, file.path);
         const dirName = path.dirname(absolutePath);
         if (!fs.existsSync(dirName)) {
           fs.mkdirSync(dirName, { recursive: true });
@@ -244,24 +277,43 @@ feature Option1 {
     }
   });
 
-  // Vite integration middleware
-  if (process.env.NODE_ENV !== "production") {
+  if (!isProduction) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
+    const assetsPath = path.resolve(options.assetsPath ?? defaultAssetsPath());
+    if (!fs.existsSync(assetsPath)) {
+      throw new Error(
+        `Frontend assets not found at ${assetsPath}. Run "npm run build" first.`,
+      );
+    }
+
+    app.use(express.static(assetsPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      res.sendFile(path.join(assetsPath, "index.html"));
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`ZXConfig server running on http://0.0.0.0:${PORT}`);
+  const url = `http://${host === "0.0.0.0" ? "localhost" : host}:${port}`;
+
+  app.listen(port, host, () => {
+    console.log(`ZXConfig server running on ${url}`);
+    console.log(`Project directory: ${projectRoot}`);
+    if (options.open) {
+      openBrowser(url);
+    }
   });
 }
 
-startServer();
+const serverPath = fileURLToPath(import.meta.url);
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+
+if (serverPath === invokedPath || invokedPath.endsWith("server.ts")) {
+  startServer().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}
