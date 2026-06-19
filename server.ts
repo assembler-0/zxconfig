@@ -9,7 +9,6 @@ import path from "path";
 import os from "os";
 import { exec } from "child_process";
 import { fileURLToPath } from "url";
-import { createServer as createViteServer } from "vite";
 
 export interface ServerOptions {
   /** Directory containing ZXConfig and .zxdsl files */
@@ -278,6 +277,7 @@ export async function startServer(options: ServerOptions = {}) {
   });
 
   if (!isProduction) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
