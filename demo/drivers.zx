@@ -1,0 +1,37 @@
+zxconfig 1.0
+
+# Driver macros.  EXPORTED is visible to files that include this one; the
+# rest is file-local and invoked below, inside this file.
+
+export macro DRV_BLOCK(id, label_name) {
+    option DRV_${id} : bool = false {
+        label "${label_name} block driver"
+        tags  ["driver", "block"]
+    }
+}
+
+export macro DRV_NET(id, label_name) {
+    option DRV_${id} : bool = false {
+        label "${label_name} network driver"
+        tags  ["driver", "net"]
+    }
+}
+
+export macro OPT(n) {
+    option STRESS_${n} : bool = false {
+        label "Stress option ${n}"
+        tags  ["stress"]
+    }
+}
+
+macro GUARDED(id, guard) {
+    option NET_${id} : bool = false {
+        label   "${id} ethernet"
+        visible ${guard} and SMP
+    }
+}
+
+DRV_BLOCK(VIRTIO_BLOCK, "VirtIO Virtual")
+DRV_NET(VIRTIO_NET, "VirtIO")
+GUARDED(E1000, SMP)
+GUARDED(R8169, SMP)

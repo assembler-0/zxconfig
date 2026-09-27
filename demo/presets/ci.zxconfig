@@ -1,0 +1,7 @@
+zxcache 1
+set SMP bool "true"
+set ARCH enum "x86_64"
+set PREEMPT_MODEL enum "voluntary"
+set RAM_SIZE int "2048"
+set THREADS int "16"
+set KERNEL_VERSION string "6.12.0"

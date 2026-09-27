@@ -1,0 +1,12 @@
+.cache
+.vscode
+*build*
+.p/
+/Zconfig*
+/ZXConfig*
+*.z
+config.*
+.zxconfig.cache
+.zxconfig.cache.lock
+.commandcode
+.idea

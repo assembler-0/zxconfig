@@ -1,0 +1,13 @@
+zxconfig 1.0
+
+# Namespaced include: everything here lands under `arch.` in the symbol
+# index and the generated files.
+
+option BOOT_PROTOCOL : enum = efi {
+    label   "Boot protocol"
+    choices efi | legacy
+}
+
+option KASLR : bool = true {
+    label "Kernel address space layout randomization"
+}
