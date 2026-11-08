@@ -19,7 +19,7 @@ interface does is reachable from here, so CI never needs a terminal.
 | `--save [path]` | write the cache after applying inputs (default: the cache; else `path`) |
 | `--generate` | run the manifest's `generate` directives and exit |
 | `--force` | proceed past validation errors |
-| `--cache-force` | apply a stale or broken cache, keeping what still matches |
+| `--cache-force` | apply a stale cache, keeping what still matches |
 | `--parse-only` | parse and report, then exit |
 | `--dump-tokens` | print the token stream of the root file and exit |
 | `--headless` | never open the interface |

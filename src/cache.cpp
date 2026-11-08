@@ -243,6 +243,13 @@ Result<CacheDocument> parse_cache(std::string_view text) {
             document.manifest = std::move(*value);
         } else if (field == "digest") {
             if (rest.size() != 64) return fail("digest must be 64 hex digits");
+            if (!std::all_of(rest.begin(), rest.end(), [](const char c) {
+                    return (c >= '0' && c <= '9')
+                        || (c >= 'a' && c <= 'f')
+                        || (c >= 'A' && c <= 'F');
+                })) {
+                return fail("digest must be 64 hex digits");
+            }
             document.manifest_digest = std::string{rest};
         } else if (field == "writer") {
             // Informational: records which build wrote the cache.  Readers
@@ -279,9 +286,15 @@ Result<CacheDocument> parse_cache(std::string_view text) {
 }
 
 Result<CacheDocument> load_cache(const std::filesystem::path& path,
-                                 std::string_view expected_digest) {
+                                  std::string_view expected_digest) {
     std::error_code ec;
-    if (!std::filesystem::exists(path, ec) || ec) {
+    const bool present = std::filesystem::exists(path, ec);
+    if (ec) {
+        return std::unexpected(Diagnostic::error(
+            ErrorCode::IoFailure,
+            "cannot inspect cache '" + path.string() + "': " + ec.message()));
+    }
+    if (!present) {
         return std::unexpected(Diagnostic::error(
             ErrorCode::CacheMissing,
             "no cache at '" + path.string() + "'"));

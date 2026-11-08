@@ -162,6 +162,14 @@ TEST(Reconcile, stale_refuses_unless_forced) {
     EXPECT_EQ(forced.dropped.front(), "GONE");
 }
 
+TEST(CacheFormat, rejects_a_non_hex_digest) {
+    auto parsed = zxconfig::parse_cache(
+        "zxcache 1\n"
+        "digest zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n");
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error().code, zxconfig::ErrorCode::CacheCorrupt);
+}
+
 TEST(CacheLock, is_exclusive) {
     const auto dir = fs::temp_directory_path() / "zxconfig-lock-test";
     fs::create_directories(dir);

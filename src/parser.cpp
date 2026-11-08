@@ -1244,7 +1244,11 @@ private:
             advance();
             auto rhs = parse_binary(prec + 1);
             if (rhs == nullptr) return nullptr;
-            lhs = make_binary({begin, rhs->span.end}, op.kind, std::move(lhs), std::move(rhs));
+            // Read the span before moving rhs.  The order in which function
+            // arguments are evaluated is not specified; reading rhs->span in
+            // the same call as std::move(rhs) is therefore undefined.
+            const auto end = rhs->span.end;
+            lhs = make_binary({begin, end}, op.kind, std::move(lhs), std::move(rhs));
         }
     }
 

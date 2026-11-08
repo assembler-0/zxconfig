@@ -400,6 +400,16 @@ computed USES : bool = SHORT
     EXPECT_EQ(document.assignments[0].symbol, "TARGET");
 }
 
+TEST(Evaluator, ordinary_user_edits_do_not_report_cache_type_mismatches) {
+    std::vector<zxconfig::Diagnostic> diagnostics;
+    Harness harness{R"(zxconfig 1.0
+option A : bool = false
+)", &diagnostics};
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    ASSERT_TRUE(harness.runtime.set_user_value("A", "true").has_value());
+    EXPECT_TRUE(diagnostics.empty());
+}
+
 TEST(Aliases, chains_resolve_and_cycles_stop) {
     Harness harness{R"(zxconfig 1.0
 option REAL : bool = true

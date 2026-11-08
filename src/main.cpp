@@ -37,7 +37,7 @@ constexpr std::string_view k_usage =
     "      --root <path>     directory includes may not escape (default: the file's directory)\n"
     "      --parse-only      parse the manifest and report, then exit\n"
     "      --dump-tokens     print the token stream of the root file and exit\n"
-    "      --cache-force     apply a stale or broken cache, dropping unknown symbols\n"
+    "      --cache-force     apply a stale cache, dropping unknown symbols\n"
     "      --preset <path>   apply a preset (cache format, repeatable)\n"
     "      --set <N>=<V>     set a symbol, e.g. --set NR_CPUS=16 (repeatable)\n"
     "      --unset <name>    return a symbol to its default (repeatable)\n"
@@ -249,6 +249,7 @@ public:
         const std::vector<std::size_t>& expanded) const override {
         std::vector<zxconfig::tui::Row> out;
         out.reserve(entries_.size());
+        if (entries_.empty()) return out;
 
         std::vector<char> listed(entries_.size(), 0);
         listed[0] = 1;
@@ -537,10 +538,7 @@ public:
             }
         }
         pending_cache_.reset();
-        revalidate();
-        refresh_implications();
-        // Not a mutation: the values now mirror the cache on disk, so the
-        // configuration reads as clean, not dirty.
+        if (applied > 0) after_change();
         zxconfig::log::info("cache applied: {} assignment(s) kept, {} dropped",
                             applied, dropped);
         return {};
@@ -885,7 +883,15 @@ int main(int argc, char** argv) {
 
     const std::string manifest_name =
         file->canonical.empty() ? file->path : file->canonical;
-    const std::string_view digest_parts[] = {manifest_name, file->text};
+    // The cache describes the complete manifest graph.  Hash every source in
+    // arena load order, including included fragments, so editing an include
+    // invalidates the cache just like editing the root manifest does.
+    std::vector<std::string_view> digest_parts;
+    digest_parts.reserve(static_cast<std::size_t>(arena.count()) * 2);
+    for (const auto& source : arena.files()) {
+        digest_parts.push_back(source.canonical.empty() ? source.path : source.canonical);
+        digest_parts.push_back(source.text);
+    }
     const auto digest = zxconfig::digest_manifest(digest_parts);
     const auto cache_path = zxconfig::default_cache_path(manifest_name);
 
@@ -983,7 +989,6 @@ int main(int argc, char** argv) {
 
     std::vector<zxconfig::Diagnostic> evaluation_notes;
     zxconfig::Runtime runtime{parsed.document, &evaluation_notes};
-    for (const auto& note : evaluation_notes) zxconfig::log::emit(note, &arena);
 
     if (verdict.disposition == zxconfig::CacheDisposition::Apply
         || verdict.disposition == zxconfig::CacheDisposition::ApplyPartial) {
@@ -1064,6 +1069,8 @@ int main(int argc, char** argv) {
                 break;
         }
     }
+
+    for (const auto& note : evaluation_notes) zxconfig::log::emit(note, &arena);
 
     // Validation runs over the final values: presets and overrides may well
     // have cleared what defaults violated.

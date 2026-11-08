@@ -7,6 +7,7 @@
 #include <zxconfig/error.hpp>
 
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -90,7 +91,7 @@ public:
     ///                    recorded warning, and the declaration wins.
     [[nodiscard]] Result<void> set_user_value(std::string_view name,
                                               std::string_view text,
-                                              ValueType claimed = ValueType::String);
+                                              std::optional<ValueType> claimed = std::nullopt);
 
     /// @brief Drop the user value; the symbol returns to its default.
     [[nodiscard]] Result<void> reset_symbol(std::string_view name);

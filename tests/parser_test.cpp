@@ -98,6 +98,20 @@ TEST(Parser, parses_defaults) {
     EXPECT_EQ(find(result, "G")->meta.defaults.front().value->args[0]->text, "a");
 }
 
+TEST(Parser, parses_binary_expression_spans_without_moving_before_reading) {
+    auto result = parse_text(
+        "zxconfig 1.0\n"
+        "option A : bool = true {\n"
+        "    warn A == true : \"A is enabled\"\n"
+        "}\n");
+    ASSERT_TRUE(result.ok()) << result.diagnostics.front().message;
+    const auto* symbol = find(result, "A");
+    ASSERT_NE(symbol, nullptr);
+    ASSERT_EQ(symbol->meta.warnings.size(), 1u);
+    ASSERT_NE(symbol->meta.warnings.front().condition, nullptr);
+    EXPECT_EQ(symbol->meta.warnings.front().condition->kind, ExprKind::Binary);
+}
+
 TEST(Parser, parses_metadata) {
     auto result = parse_text(
         "zxconfig 1.0\n"

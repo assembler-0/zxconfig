@@ -788,7 +788,7 @@ std::vector<Diagnostic> Runtime::run_validation() const {
 
 Result<void> Runtime::set_user_value(std::string_view name,
                                      std::string_view text,
-                                     ValueType claimed) {
+                                     std::optional<ValueType> claimed) {
     const auto* sym = symbol(name);
     if (sym == nullptr) {
         return std::unexpected(Diagnostic::error(
@@ -799,11 +799,11 @@ Result<void> Runtime::set_user_value(std::string_view name,
             ErrorCode::TypeMismatch, "'" + std::string{name} + "' is computed and read-only"));
     }
 
-    if (claimed != sym->type) {
+    if (claimed.has_value() && *claimed != sym->type) {
         if (diagnostics_ != nullptr) {
             diagnostics_->push_back(Diagnostic::warning(
                 ErrorCode::TypeMismatch,
-                "cache records '" + std::string{name} + "' as " + to_string(claimed)
+                "cache records '" + std::string{name} + "' as " + to_string(*claimed)
                     + " but the manifest declares " + to_string(sym->type)));
         }
     }
@@ -862,9 +862,25 @@ Result<void> Runtime::set_user_value(std::string_view name,
 
     // Store under the resolved name: an alias writes its target's slot, so
     // the value round-trips under one canonical symbol.
+    const auto old_value = user_values_.find(sym->name);
+    const bool was_set = user_set_.contains(sym->name);
+    std::optional<EvalValue> previous;
+    if (old_value != user_values_.end()) previous = old_value->second;
+
     user_values_[sym->name] = std::move(*value);
     user_set_.insert(sym->name);
-    return evaluate();
+    if (auto evaluated = evaluate(); !evaluated) {
+        if (previous.has_value()) {
+            user_values_[sym->name] = std::move(*previous);
+        } else {
+            user_values_.erase(sym->name);
+        }
+        if (was_set) user_set_.insert(sym->name);
+        else user_set_.erase(sym->name);
+        (void)evaluate();
+        return std::unexpected(evaluated.error());
+    }
+    return {};
 }
 
 Result<void> Runtime::reset_symbol(std::string_view name) {
@@ -873,9 +889,24 @@ Result<void> Runtime::reset_symbol(std::string_view name) {
         return std::unexpected(Diagnostic::error(
             ErrorCode::UnknownSymbol, "'" + std::string{name} + "' is not declared"));
     }
+    if (sym->computed) {
+        return std::unexpected(Diagnostic::error(
+            ErrorCode::TypeMismatch, "'" + std::string{name} + "' is computed and read-only"));
+    }
+
+    const auto old_value = user_values_.find(sym->name);
+    const bool was_set = user_set_.contains(sym->name);
+    std::optional<EvalValue> previous;
+    if (old_value != user_values_.end()) previous = old_value->second;
     user_set_.erase(sym->name);
     user_values_.erase(sym->name);
-    return evaluate();
+    if (auto evaluated = evaluate(); !evaluated) {
+        if (previous.has_value()) user_values_[sym->name] = std::move(*previous);
+        if (was_set) user_set_.insert(sym->name);
+        (void)evaluate();
+        return std::unexpected(evaluated.error());
+    }
+    return {};
 }
 
 Result<void> Runtime::apply_assignment(std::string_view name,

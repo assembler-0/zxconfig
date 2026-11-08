@@ -131,12 +131,16 @@ public:
             sigaddset(&set, SIGTERM);
             return set;
         }();
-        ::pthread_sigmask(SIG_BLOCK, &k_watched, nullptr);
+        sigset_t previous_mask{};
+        ::pthread_sigmask(SIG_BLOCK, &k_watched, &previous_mask);
 
-        std::thread watcher([&screen] {
+        std::atomic_bool stopping{false};
+        std::thread watcher([&screen, &stopping] {
             int delivered = 0;
             if (::sigwait(&k_watched, &delivered) == 0) {
-                ScreenInteractive::PostEventOrExecute([&screen] { screen.Exit(); });
+                if (!stopping.load(std::memory_order_acquire)) {
+                    ScreenInteractive::PostEventOrExecute([&screen] { screen.Exit(); });
+                }
             }
         });
 
@@ -151,7 +155,12 @@ public:
         } catch (...) {
         }
 
-        watcher.detach();
+        // sigwait has no cancellation primitive.  Wake it with the same
+        // blocked signal, then join while the stack screen is still alive.
+        stopping.store(true, std::memory_order_release);
+        ::pthread_kill(watcher.native_handle(), SIGTERM);
+        watcher.join();
+        ::pthread_sigmask(SIG_SETMASK, &previous_mask, nullptr);
         return code;
     }
 
@@ -624,6 +633,7 @@ private:
             if (!refusal.empty()) {
                 refuse(refusal);
             } else {
+                dirty_ = true;
                 message_ = "cache applied.";
                 popup_kind_ = Popup::Message;
                 open_popup();
@@ -979,7 +989,12 @@ private:
         const auto current = choice_is_prompt_
             ? std::string{"choose a fix, or skip"}
             : "current: " + data.value;
-        return Renderer(Container::Vertical({list, buttons}),
+        auto form = Container::Vertical({list, buttons});
+        // Renderer is a view and does not forward input.  Keep the actual
+        // selector tree as the popup event target so arrows, space, and
+        // button activation reach the live controls.
+        popup_events_ = form;
+        return Renderer(form,
                         [this, name, current, list, buttons, multi] {
                             // Built per frame: the selection must repaint.
                             Element content = vbox({
@@ -1125,6 +1140,7 @@ private:
             refuse(refusal);
             return;
         }
+        dirty_ = true;
         message_ = "preset loaded: " + clip(path, 44);
         popup_kind_ = Popup::Message;
         open_popup();
@@ -1234,10 +1250,17 @@ private:
     void open_choice(const Row& row) {
         choice_id_ = row.id;
         choice_items_.clear();
-        for (const auto& item : split_list(controller_.detail(row.id).choices)) {
+        const auto data = controller_.detail(row.id);
+        for (const auto& item : split_list(data.choices)) {
             choice_items_.emplace_back(item, item);
         }
         radiobox_selected_ = 0;
+        for (std::size_t i = 0; i < choice_items_.size(); ++i) {
+            if (choice_items_[i].first == data.value) {
+                radiobox_selected_ = static_cast<int>(i);
+                break;
+            }
+        }
         choice_multi_ = row.kind == Kind::Set;
         choice_is_prompt_ = false;
         popup_kind_ = Popup::Choice;
