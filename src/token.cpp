@@ -8,7 +8,6 @@ namespace {
 constexpr Keyword k_keywords[] = {
     {"alias",      TokenKind::KwAlias},
     {"and",        TokenKind::KwAnd},
-    {"as",         TokenKind::KwAs},
     {"bool",       TokenKind::KwBool},
     {"choice",     TokenKind::KwChoice},
     {"choices",    TokenKind::KwChoices},
@@ -38,6 +37,7 @@ constexpr Keyword k_keywords[] = {
     {"menu",       TokenKind::KwMenu},
     {"message",    TokenKind::KwMessage},
     {"must_exist", TokenKind::KwMustExist},
+    {"namespace",  TokenKind::KwNamespace},
     {"not",        TokenKind::KwNot},
     {"option",     TokenKind::KwOption},
     {"or",         TokenKind::KwOr},
@@ -129,8 +129,8 @@ const char* to_string(TokenKind kind) noexcept {
         case TokenKind::KwEnabled: case TokenKind::KwImplies: case TokenKind::KwDefault:
         case TokenKind::KwOrder: case TokenKind::KwPattern: case TokenKind::KwChoices:
         case TokenKind::KwResolve: case TokenKind::KwMessage: case TokenKind::KwFrom:
-        case TokenKind::KwAs: case TokenKind::KwFallback: case TokenKind::KwMustExist:
-        case TokenKind::KwIsDir: case TokenKind::KwHeader: case TokenKind::KwMakefile:
+         case TokenKind::KwFallback: case TokenKind::KwMustExist:
+         case TokenKind::KwIsDir: case TokenKind::KwNamespace: case TokenKind::KwHeader: case TokenKind::KwMakefile:
         case TokenKind::KwJson: case TokenKind::KwCmake: case TokenKind::KwTemplate:
         case TokenKind::KwAnd: case TokenKind::KwOr: case TokenKind::KwNot:
             break;

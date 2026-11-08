@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <regex>
+#include <sys/utsname.h>
 
 namespace zxconfig {
 namespace {
@@ -93,6 +94,19 @@ std::expected<int, Diagnostic> compare(const EvalValue& lhs, const EvalValue& rh
     }
     return std::unexpected(Diagnostic::error(
         ErrorCode::TypeMismatch, "cannot compare these operand types"));
+}
+
+std::optional<std::string> host_builtin(std::string_view name) {
+    static const auto info = [] {
+        struct utsname value{};
+        (void)::uname(&value);
+        return value;
+    }();
+    if (name == "HOST_OS") return std::string{info.sysname};
+    if (name == "HOST_KERNEL") return std::string{info.release};
+    if (name == "HOST_ARCH") return std::string{info.machine};
+    if (name == "HOST_NODE") return std::string{info.nodename};
+    return std::nullopt;
 }
 
 }  // namespace
@@ -204,6 +218,25 @@ std::int64_t truth_level(const EvalValue& value) {
 
 Runtime::Runtime(const Document& document, std::vector<Diagnostic>* diagnostics)
     : document_{document}, diagnostics_{diagnostics} {}
+
+const Symbol* Runtime::resolve_symbol(std::string_view name, SourceSpan span,
+                                      const Scope& scope) const {
+    if (name.find('.') == std::string_view::npos) {
+        std::string_view ns;
+        if (const auto file = document_.file_namespaces.find(span.begin.file_id);
+            file != document_.file_namespaces.end()) {
+            ns = file->second;
+        } else if (scope.current != nullptr) {
+            ns = scope.current->namespace_;
+        }
+        if (!ns.empty()) {
+            if (const auto* found = symbol(std::string{ns} + "." + std::string{name})) {
+                return found;
+            }
+        }
+    }
+    return symbol(name);
+}
 
 const Symbol* Runtime::symbol(std::string_view name) const {
     const auto direct = [this](std::string_view candidate) -> const Symbol* {
@@ -360,7 +393,7 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
             items.reserve(expr.args.size());
             for (const auto& item : expr.args) {
                 if (item == nullptr) continue;
-                if (item->is(ExprKind::Ident)) {
+                if (item->is(ExprKind::Ident) && item->op.kind != TokenKind::Dollar) {
                     items.push_back(item->text);
                 } else if (item->is(ExprKind::StringLit)) {
                     // Interpolated like any string value; rendered back to
@@ -370,16 +403,25 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
                     items.push_back(render_value(*value, ValueType::String));
                 } else if (item->is(ExprKind::IntLit)) {
                     items.push_back(std::to_string(item->number));
+                } else {
+                    auto value = evaluate_expr(*item, scope);
+                    if (!value) return std::unexpected(value.error());
+                    if (std::holds_alternative<std::vector<std::string>>(*value)
+                        || std::holds_alternative<std::monostate>(*value)) {
+                        return std::unexpected(Diagnostic::error(
+                            ErrorCode::TypeMismatch, "collection items must be scalar values", item->span));
+                    }
+                    items.push_back(render_value(*value, ValueType::String));
                 }
             }
             return EvalValue{std::move(items)};
         }
         case ExprKind::Ident: {
-            if (scope.current != nullptr && !scope.current->namespace_.empty()) {
-                const auto qualified = scope.current->namespace_ + "." + expr.text;
-                if (const auto* sym = symbol(qualified)) return evaluate_symbol(*sym, scope);
+            if (const auto* sym = resolve_symbol(expr.text, expr.span, scope)) {
+                return evaluate_symbol(*sym, scope);
             }
-            if (const auto* sym = symbol(expr.text)) return evaluate_symbol(*sym, scope);
+
+            if (const auto host = host_builtin(expr.text)) return EvalValue{*host};
 
             if (expr.text == "n" || expr.text == "m" || expr.text == "y") {
                 return EvalValue{expr.text == "n" ? std::int64_t{0}
@@ -429,6 +471,10 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
             }
             auto lhs = evaluate_expr(*expr.args[0], scope);
             if (!lhs) return std::unexpected(lhs.error());
+            if ((expr.op.kind == TokenKind::AmpAmp || expr.op.kind == TokenKind::KwAnd)
+                && truth_level(*lhs) == 0) return EvalValue{std::int64_t{0}};
+            if ((expr.op.kind == TokenKind::PipePipe || expr.op.kind == TokenKind::KwOr)
+                && truth_level(*lhs) == 2) return EvalValue{std::int64_t{2}};
             auto rhs = evaluate_expr(*expr.args[1], scope);
             if (!rhs) return std::unexpected(rhs.error());
 
@@ -441,6 +487,43 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
                     return EvalValue{std::max(truth_level(*lhs), truth_level(*rhs))};
                 case TokenKind::EqEq:
                 case TokenKind::NotEq: {
+                    if (const auto* left = std::get_if<std::vector<std::string>>(&*lhs)) {
+                        const auto* right = std::get_if<std::vector<std::string>>(&*rhs);
+                        if (right == nullptr) {
+                            return std::unexpected(Diagnostic::error(
+                                ErrorCode::TypeMismatch, "a collection must be compared with a collection", expr.span));
+                        }
+                        const auto is_set = [&](const auto& self, const Expr& operand) -> bool {
+                            if (operand.kind == ExprKind::SequenceLit) {
+                                return operand.op.kind == TokenKind::LBrace;
+                            }
+                            if (operand.kind == ExprKind::Ternary && operand.args.size() == 3) {
+                                auto condition = evaluate_expr(*operand.args[0], scope);
+                                if (condition) {
+                                    return self(self, *operand.args[truth_level(*condition) != 0 ? 1 : 2]);
+                                }
+                            }
+                            const auto* declaration = operand.kind == ExprKind::Ident
+                                ? resolve_symbol(operand.text, operand.span, scope) : nullptr;
+                            return declaration != nullptr && declaration->type == ValueType::Set;
+                        };
+                        auto a = *left;
+                        auto b = *right;
+                        const bool left_set = is_set(is_set, *expr.args[0]);
+                        const bool right_set = is_set(is_set, *expr.args[1]);
+                        if (left_set != right_set) {
+                            return std::unexpected(Diagnostic::error(
+                                ErrorCode::TypeMismatch, "cannot compare a set with a list", expr.span));
+                        }
+                        if (left_set) {
+                            std::sort(a.begin(), a.end());
+                            std::sort(b.begin(), b.end());
+                            a.erase(std::unique(a.begin(), a.end()), a.end());
+                            b.erase(std::unique(b.begin(), b.end()), b.end());
+                        }
+                        const bool equal = a == b;
+                        return EvalValue{expr.op.kind == TokenKind::EqEq ? equal : !equal};
+                    }
                     auto ordering = compare(*lhs, *rhs);
                     if (!ordering) return std::unexpected(ordering.error());
                     const auto equal = *ordering == 0;
@@ -542,6 +625,14 @@ Result<EvalValue> Runtime::interpolate(std::string_view text,
         }
         out.append(text.substr(at, open - at));
 
+        // A doubled dollar escapes expansion, including $${NAME}.
+        if (open > at && text[open - 1] == '$') {
+            out.pop_back();
+            out += "${";
+            at = open + 2;
+            continue;
+        }
+
         const auto close = text.find('}', open + 2);
         if (close == std::string_view::npos) {
             return std::unexpected(Diagnostic::error(
@@ -551,11 +642,15 @@ Result<EvalValue> Runtime::interpolate(std::string_view text,
 
         // Resolution is the identifier rule: the referencing symbol's
         // namespace first, then the alias chain.
-        const Symbol* target = nullptr;
-        if (scope.current != nullptr && !scope.current->namespace_.empty()) {
-            target = symbol(scope.current->namespace_ + "." + std::string{name});
+        const Symbol* target = resolve_symbol(name, span, scope);
+
+        if (target == nullptr) {
+            if (const auto host = host_builtin(name)) {
+                out.append(*host);
+                at = close + 1;
+                continue;
+            }
         }
-        if (target == nullptr) target = symbol(name);
 
         if (target == nullptr) {
             if (name == "n" || name == "m" || name == "y" || is_any_choice(document_, name)) {
@@ -581,12 +676,50 @@ Result<EvalValue> Runtime::interpolate(std::string_view text,
     return EvalValue{std::move(out)};
 }
 
+Result<std::string> Runtime::expand_text(std::string_view text,
+                                         std::string_view context, SourceSpan span) const {
+    Scope scope;
+    if (!context.empty()) scope.current = symbol(context);
+    auto expanded = interpolate(text, scope, span);
+    if (!expanded) return std::unexpected(expanded.error());
+    return render_value(*expanded, ValueType::String);
+}
+
 Result<EvalValue> Runtime::evaluate_call(const Expr& call, Scope& scope) const {
     if (call.args.empty() || call.args.front() == nullptr) {
         return std::unexpected(Diagnostic::error(
             ErrorCode::Invariant, "call without arguments", call.span));
     }
     const auto& name = call.text;
+
+    if (name == "type_of") {
+        const auto& argument = *call.args.front();
+        if (argument.kind == ExprKind::Ident) {
+            if (const auto* declaration = resolve_symbol(argument.text, argument.span, scope)) {
+                return EvalValue{std::string{to_string(declaration->type)}};
+            }
+        }
+        auto value = evaluate_expr(argument, scope);
+        if (!value) return std::unexpected(value.error());
+        if (std::holds_alternative<bool>(*value)) return EvalValue{std::string{"bool"}};
+        if (std::holds_alternative<std::int64_t>(*value)) return EvalValue{std::string{"int"}};
+        if (std::holds_alternative<std::string>(*value)) return EvalValue{std::string{"string"}};
+        return EvalValue{std::string{argument.op.kind == TokenKind::LBrace ? "set" : "list"}};
+    }
+
+    if (name == "contains") {
+        auto collection = evaluate_expr(*call.args[0], scope);
+        if (!collection) return std::unexpected(collection.error());
+        auto item = evaluate_expr(*call.args[1], scope);
+        if (!item) return std::unexpected(item.error());
+        const auto* values = std::get_if<std::vector<std::string>>(&*collection);
+        const auto* text = std::get_if<std::string>(&*item);
+        if (values == nullptr || text == nullptr) {
+            return std::unexpected(Diagnostic::error(
+                ErrorCode::TypeMismatch, "contains takes a collection and a string or enum choice", call.span));
+        }
+        return EvalValue{std::find(values->begin(), values->end(), *text) != values->end()};
+    }
 
     if (name == "is_defined" || name == "defined_and_true") {
         const auto& argument = *call.args.front();
@@ -595,10 +728,12 @@ Result<EvalValue> Runtime::evaluate_call(const Expr& call, Scope& scope) const {
                 ErrorCode::TypeMismatch, name + " takes a symbol name",
                 argument.span.is_valid() ? argument.span : call.span));
         }
-        const bool defined = symbol(argument.text) != nullptr;
+        const auto* sym = resolve_symbol(argument.text, argument.span, scope);
+        const auto host = host_builtin(argument.text);
+        const bool defined = sym != nullptr || host.has_value();
         if (name == "is_defined") return EvalValue{defined};
         if (!defined) return EvalValue{false};
-        const auto* sym = symbol(argument.text);
+        if (host && sym == nullptr) return EvalValue{!host->empty()};
         auto value = evaluate_symbol(*sym, scope);
         if (!value) return std::unexpected(value.error());
         return EvalValue{truth_level(*value) > 0};
@@ -610,7 +745,9 @@ Result<EvalValue> Runtime::evaluate_call(const Expr& call, Scope& scope) const {
             return std::unexpected(Diagnostic::error(
                 ErrorCode::TypeMismatch, name + " takes a string literal", call.span));
         }
-        return run_probe(name, argument.text);
+        auto expanded = interpolate(argument.text, scope, argument.span);
+        if (!expanded) return std::unexpected(expanded.error());
+        return run_probe(name, std::get<std::string>(*expanded));
     }
 
     // The remaining builtins are arithmetic; all operands must be integers.
@@ -753,10 +890,11 @@ std::vector<Diagnostic> Runtime::run_validation() const {
             return;
         }
         if (truth_level(*result) == 0) {
+            auto expanded = expand_text(message, {}, span);
             findings.push_back(Diagnostic{
                 ErrorCode::ConstraintViolated,
                 warning ? Severity::Warning : Severity::Error,
-                message, span});
+                expanded ? *expanded : message, span});
         }
     };
 
@@ -777,9 +915,10 @@ std::vector<Diagnostic> Runtime::run_validation() const {
                 continue;
             }
             if (truth_level(*result) != 0) {
+                auto expanded = expand_text(clause.message, sym->name);
                 findings.push_back(Diagnostic{
                     ErrorCode::ConstraintViolated, Severity::Warning,
-                    clause.message, sym->span});
+                    expanded ? *expanded : clause.message, sym->span});
             }
         }
     }
@@ -1012,6 +1151,12 @@ std::vector<Implication> Runtime::unsatisfied_implications() const {
             Implication implication;
             implication.source = sym->name;
             implication.fixes = fixes_for(*clause);
+            for (auto& fix : implication.fixes) {
+                if (const auto* target = resolve_symbol(fix.symbol, clause->span, scope)) {
+                    fix.symbol = target->name;
+                    fix.description = target->name + " = " + fix.value;
+                }
+            }
 
             // A conflict naming one of the fix targets supplies the prompt
             // text and, with the error policy, the save gate.

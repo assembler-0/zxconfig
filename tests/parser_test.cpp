@@ -337,8 +337,8 @@ TEST(Parser, namespaces_included_symbols) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "net.zx"} << "zxconfig 1.0\noption VIRTIO : bool\n";
-    std::ofstream{dir / "root.zx"} << "zxconfig 1.0\ninclude \"net.zx\" as net\n";
+    std::ofstream{dir / "net.zx"} << "zxconfig 1.0\nnamespace net\noption VIRTIO : bool\n";
+    std::ofstream{dir / "root.zx"} << "zxconfig 1.0\ninclude \"net.zx\"\n";
 
     zxconfig::SourceArena arena;
     auto root = arena.load((dir / "root.zx").string(), {}, dir.string());
@@ -353,6 +353,16 @@ TEST(Parser, namespaces_included_symbols) {
     EXPECT_NE(result.document.symbols.find("net.VIRTIO"), result.document.symbols.end());
 
     fs::remove_all(dir);
+}
+
+TEST(Parser, namespace_belongs_to_the_file_and_as_is_rejected) {
+    auto standalone = parse_text(
+        "zxconfig 1.0\nnamespace arch.cpu\noption ArTargetCpu : int = 1\n");
+    ASSERT_TRUE(standalone.ok());
+    EXPECT_NE(find(standalone, "arch.cpu.ArTargetCpu"), nullptr);
+    auto removed = parse_text("zxconfig 1.0\ninclude \"missing.zx\" as arch\n");
+    ASSERT_FALSE(removed.ok());
+    EXPECT_EQ(removed.diagnostics.front().code, zxconfig::ErrorCode::UnsupportedConstruct);
 }
 
 TEST(Parser, skips_an_unnamespaced_double_include) {

@@ -13,7 +13,7 @@ GoogleTest for the tests.
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build
-ctest --test-dir build        # 146 tests
+ctest --test-dir build
 cmake --install build
 ```
 
@@ -23,7 +23,7 @@ cmake --install build
 cd demo && ../build/zxconfig
 ```
 
-58 symbols across 8 menus: every language feature, five generators.
+60 symbols across 8 menus: types, macros, file namespaces, five generators.
 
 ## Use it
 

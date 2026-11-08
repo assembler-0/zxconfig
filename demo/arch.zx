@@ -1,4 +1,5 @@
 zxconfig 1.0
+namespace arch
 
 # Namespaced include: everything here lands under `arch.` in the symbol
 # index and the generated files.

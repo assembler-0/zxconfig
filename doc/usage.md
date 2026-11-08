@@ -7,7 +7,7 @@ cd demo && ../build/zxconfig      # the demo project
 ```
 
 The root manifest is `./ZXConfig` unless `-f` names another.  The demo
-carries 58 symbols across 8 menus: every type, macros, namespaced includes,
+carries 60 symbols across 8 menus: every type, macros, file namespaces,
 probes, validation rules, and five generators.
 
 ## The pipeline
@@ -48,7 +48,7 @@ Every run walks the same steps:
 │ [-] Architecture                  │ NR_CPUS                     │
 │     [*] Symmetric multipro…   …   │ Max CPU count               │
 │     …                             │ … type, default, range …    │
-│                                   │ exports CONFIG_NR_CPUS      │
+│                                   │ exports NR_CPUS             │
 │                                   │ from Zconfig -> arch.zx:4   │
 ├ [ ERROR ] first finding ─────────────────────────────────────────┤
 │ log ────────────────────────────────────────────────────────────│

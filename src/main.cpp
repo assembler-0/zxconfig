@@ -304,6 +304,7 @@ public:
             for (const auto& tag : entry.symbol->meta.tags) {
                 label += " [" + tag + "]";
             }
+            if (auto expanded = runtime_.expand_text(label, entry.symbol->name)) label = std::move(*expanded);
             items.push_back({i, entry.symbol->name, std::move(label)});
         }
         return items;
@@ -317,6 +318,8 @@ public:
         out.name = symbol.name;
         out.label = symbol.meta.label;
         out.help = symbol.meta.help;
+        if (auto expanded = runtime_.expand_text(out.label, symbol.name)) out.label = std::move(*expanded);
+        if (auto expanded = runtime_.expand_text(out.help, symbol.name)) out.help = std::move(*expanded);
         out.type = zxconfig::to_string(symbol.type);
         if (symbol.computed) out.type += " (computed)";
 
@@ -370,7 +373,7 @@ public:
         }
         out.flags = flags;
 
-        std::string prefix = "CONFIG_";
+        std::string prefix;
         for (const auto& directive : document_.generates) {
             if (directive.backend == zxconfig::GenerateDirective::Backend::Header
                 && !directive.prefix.empty()) {
@@ -684,6 +687,7 @@ private:
         row.expanded = is_expanded;
         row.name = entry.menu->label;
         row.label = entry.menu->label;
+        if (auto expanded = runtime_.expand_text(row.label, {}, entry.menu->span)) row.label = std::move(*expanded);
         return row;
     }
 
@@ -712,6 +716,9 @@ private:
         row.kind = symbol.computed ? zxconfig::tui::Kind::Computed : kind_of(symbol.type);
 
         row.label = symbol.meta.label.empty() ? symbol.name : symbol.meta.label;
+        if (auto expanded = runtime_.expand_text(row.label, symbol.name)) {
+            row.label = std::move(*expanded);
+        }
         const auto* value = runtime_.value(symbol.name);
         row.value = value != nullptr
             ? zxconfig::render_value(*value, symbol.type) : "<unset>";

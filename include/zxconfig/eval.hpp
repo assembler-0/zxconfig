@@ -126,6 +126,12 @@ public:
     /// returns B's declaration, through a bounded chain.
     [[nodiscard]] const Symbol* symbol(std::string_view name) const;
 
+    /// @brief Expand `${NAME}` references in interface and generator text.
+    /// @param[in] text text containing zero or more references
+    /// @param[in] context canonical symbol name used for namespace fallback
+    [[nodiscard]] Result<std::string> expand_text(
+        std::string_view text, std::string_view context = {}, SourceSpan span = {}) const;
+
     /// @brief Symbols with user values, in declaration-independent order.
     [[nodiscard]] std::vector<std::string> user_symbols() const;
 
@@ -151,6 +157,10 @@ private:
         const Symbol* current{nullptr};
         std::vector<const Symbol*> stack;
     };
+
+    [[nodiscard]] const Symbol* resolve_symbol(std::string_view name,
+                                               SourceSpan span,
+                                               const Scope& scope) const;
 
     [[nodiscard]] Result<EvalValue> evaluate_symbol(const Symbol& symbol, Scope& scope) const;
     [[nodiscard]] Result<EvalValue> evaluate_expr(const Expr& expr, Scope& scope) const;

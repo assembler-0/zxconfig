@@ -115,7 +115,7 @@ struct Metadata {
 struct Symbol {
     std::string name;        ///< namespaced final name
     std::string raw_name;    ///< as written in the source
-    std::string namespace_;  ///< prefix applied by the include, if any
+    std::string namespace_;  ///< namespace declared by the defining file
     ValueType type{ValueType::Bool};
     ValueType element{ValueType::String};  ///< list element type
     bool computed{false};
@@ -152,7 +152,7 @@ struct GenerateDirective {
     Backend backend{Backend::Header};
     std::string output;
     std::string template_path;  ///< for Backend::Template
-    std::string prefix;         ///< macro prefix for Backend::Header; empty = CONFIG_
+    std::string prefix;         ///< optional explicit prefix for Backend::Header
     SourceSpan span{};
 };
 
@@ -201,6 +201,7 @@ struct Document {
     std::vector<DeprecatedDirective> deprecated;
     std::vector<Macro> macros;
     std::unordered_map<std::string, Symbol*> symbols;
+    std::unordered_map<std::uint32_t, std::string> file_namespaces;
 };
 
 /// @brief Size summary of a parsed document.

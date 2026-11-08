@@ -6,7 +6,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
 #include <string>
+#include <sys/utsname.h>
 
 namespace {
 
@@ -501,4 +504,129 @@ computed PATHS : list<string> = ["${PREFIX}/bin", "${PREFIX}/lib"]
     ASSERT_EQ(items.size(), 2u);
     EXPECT_EQ(items[0], "/usr/bin");
     EXPECT_EQ(items[1], "/usr/lib");
+}
+
+TEST(Expressions, collections_work_in_all_condition_fields) {
+    Harness harness{R"(zxconfig 1.0
+option Arch : enum = s390x { choices s390x | arm64 }
+option Flags : set = {kasan, ubsan} { choices kasan | ubsan }
+option Ordered : list<string> = ["first", "second"]
+option Visible : bool = true {
+    visible Arch == s390x and Flags == {ubsan, kasan}
+    enabled contains(Flags, kasan)
+    warn Flags == {} : "flags must be nonempty"
+}
+option Legacy : bool = true { when Flags == {kasan, ubsan, kasan} }
+menu "Predicates" visible Flags == {ubsan, kasan} {
+    option Child : bool = true
+}
+computed IsSet : bool = type_of(Flags) == "set"
+computed IsList : bool = type_of(Ordered) == "list"
+computed OrderedEqual : bool = Ordered == ["second", "first"]
+computed Chosen : int = Flags == {ubsan, kasan} ? 3 : 4
+computed ConditionalSet : bool = Flags == (true ? {ubsan, kasan} : {})
+computed References : list<string> = ["${Arch}", ${Arch}]
+computed Guarded : bool = false and (1 / 0 == 1)
+validate "set equality" { Flags == {ubsan, kasan} }
+warn "scalar enum equality" { ${Arch} == s390x }
+)"};
+    ASSERT_TRUE(harness.parsed.ok());
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    EXPECT_TRUE(harness.runtime.is_visible("Visible"));
+    EXPECT_TRUE(harness.runtime.is_visible("Legacy"));
+    EXPECT_TRUE(harness.runtime.is_visible("Child"));
+    EXPECT_TRUE(harness.runtime.is_enabled("Visible"));
+    EXPECT_EQ(zxconfig::truth_level(*harness.runtime.value("IsSet")), 2);
+    EXPECT_EQ(zxconfig::truth_level(*harness.runtime.value("IsList")), 2);
+    EXPECT_EQ(zxconfig::truth_level(*harness.runtime.value("OrderedEqual")), 0);
+    EXPECT_EQ(std::get<std::int64_t>(*harness.runtime.value("Chosen")), 3);
+    EXPECT_EQ(zxconfig::truth_level(*harness.runtime.value("ConditionalSet")), 2);
+    EXPECT_EQ(std::get<std::vector<std::string>>(*harness.runtime.value("References")),
+              (std::vector<std::string>{"s390x", "s390x"}));
+    EXPECT_TRUE(harness.runtime.run_validation().empty());
+    ASSERT_TRUE(harness.runtime.set_user_value("Flags", "kasan").has_value());
+    EXPECT_FALSE(harness.runtime.is_visible("Visible"));
+    EXPECT_FALSE(harness.runtime.is_visible("Child"));
+    EXPECT_EQ(harness.runtime.run_validation().size(), 1u);
+}
+
+TEST(Namespaces, defining_file_controls_scope_and_include_conditions_update) {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "zxconfig-file-namespace-eval";
+    fs::create_directories(dir);
+    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.0
+option Arch : enum = s390x { choices s390x | arm64 }
+option Value : int = 7
+include "arch.zx" visible Arch == s390x
+computed GlobalRead : int = arch.Copy
+)";
+    std::ofstream{dir / "arch.zx"} << R"(zxconfig 1.0
+namespace arch
+option Arch : enum = arm64 { choices s390x | arm64 }
+option Value : int = 9
+computed Copy : int = Value
+computed Text : string = "${Value}"
+computed Defined : bool = is_defined(Value)
+alias Short = Value
+menu "Local menu" visible Value == 9 { option Inside : bool = true }
+validate "local scope" { Value == 9 }
+)";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string(), {}, dir.string());
+    ASSERT_TRUE(id.has_value());
+    auto parsed = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_TRUE(parsed.ok());
+    zxconfig::Runtime runtime{parsed.document};
+    ASSERT_TRUE(runtime.evaluate().has_value());
+    EXPECT_EQ(std::get<std::int64_t>(*runtime.value("arch.Copy")), 9);
+    EXPECT_EQ(std::get<std::int64_t>(*runtime.value("GlobalRead")), 9);
+    EXPECT_EQ(std::get<std::int64_t>(*runtime.value("arch.Short")), 9);
+    EXPECT_EQ(std::get<std::string>(*runtime.value("arch.Text")), "9");
+    EXPECT_EQ(zxconfig::truth_level(*runtime.value("arch.Defined")), 2);
+    EXPECT_TRUE(runtime.run_validation().empty());
+    EXPECT_TRUE(runtime.is_visible("arch.Inside"));
+    ASSERT_TRUE(runtime.set_user_value("Arch", "arm64").has_value());
+    EXPECT_FALSE(runtime.is_visible("arch.Inside"));
+    EXPECT_FALSE(runtime.is_visible("arch.Value"));
+    ASSERT_TRUE(runtime.set_user_value("Arch", "s390x").has_value());
+    EXPECT_TRUE(runtime.is_visible("arch.Inside"));
+    EXPECT_TRUE(runtime.is_visible("arch.Value"));
+    fs::remove_all(dir);
+}
+
+TEST(HostBuiltins, values_match_the_running_host_and_expand_in_probes) {
+    struct utsname info{};
+    ASSERT_EQ(::uname(&info), 0);
+    Harness harness{R"(zxconfig 1.0
+computed Os : string = HOST_OS
+computed Cpu : string = HOST_ARCH
+computed Release : string = "${HOST_KERNEL}"
+computed Node : string = HOST_NODE
+computed Query : string = shell("printf '%s' '${HOST_OS}'")
+computed Present : bool = is_defined(HOST_OS)
+)"};
+    ASSERT_TRUE(harness.parsed.ok());
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    EXPECT_EQ(std::get<std::string>(*harness.runtime.value("Os")), info.sysname);
+    EXPECT_EQ(std::get<std::string>(*harness.runtime.value("Cpu")), info.machine);
+    EXPECT_EQ(std::get<std::string>(*harness.runtime.value("Release")), info.release);
+    EXPECT_EQ(std::get<std::string>(*harness.runtime.value("Node")), info.nodename);
+    EXPECT_EQ(std::get<std::string>(*harness.runtime.value("Query")), info.sysname);
+    EXPECT_EQ(zxconfig::truth_level(*harness.runtime.value("Present")), 2);
+}
+
+TEST(Expressions, rejects_set_list_equality_and_collection_ordering) {
+    Harness mixed{R"(zxconfig 1.0
+computed Mixed : bool = {a} == ["a"]
+)"};
+    ASSERT_TRUE(mixed.parsed.ok());
+    auto failed = mixed.runtime.evaluate();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failed.error().code, zxconfig::ErrorCode::TypeMismatch);
+    Harness ordered{R"(zxconfig 1.0
+computed Ordered : bool = {a} < {b}
+)"};
+    failed = ordered.runtime.evaluate();
+    ASSERT_FALSE(failed.has_value());
+    EXPECT_EQ(failed.error().code, zxconfig::ErrorCode::TypeMismatch);
 }

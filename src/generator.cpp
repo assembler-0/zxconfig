@@ -2,7 +2,6 @@
 
 #include <zxconfig/generator.hpp>
 
-#include <cctype>
 #include <fstream>
 #include <iterator>
 #include <unordered_map>
@@ -10,17 +9,30 @@
 namespace zxconfig {
 namespace {
 
-std::string map_name(std::string_view name, std::string_view prefix) {
-    std::string out;
-    out.reserve(prefix.size() + name.size());
-    out += prefix;
-    for (const char c : name) {
-        out.push_back(c == '.' ? '_'
-                    : static_cast<char>(std::islower(static_cast<unsigned char>(c))
-                                            ? c - 'a' + 'A'
-                                            : c));
+Result<void> check_export_names(const Runtime& runtime, std::string_view prefix = {}) {
+    std::unordered_map<std::string, std::string> claimed;
+    for (const auto* symbol : runtime.declared_symbols()) {
+        const auto claim = [&](std::string name) -> Result<void> {
+            const auto [it, inserted] = claimed.emplace(std::move(name), symbol->name);
+            if (!inserted) {
+                return std::unexpected(Diagnostic::error(
+                    ErrorCode::NamespaceCollision,
+                    "'" + symbol->name + "' and '" + it->second
+                        + "' both export '" + it->first + "'", symbol->span));
+            }
+            return {};
+        };
+        if (auto result = claim(macro_name(*symbol, prefix)); !result) return result;
+        if (symbol->type == ValueType::Tristate) {
+            if (auto result = claim(macro_name(*symbol, prefix) + "_MODULE"); !result) return result;
+        }
+        if (symbol->type == ValueType::Enum || symbol->type == ValueType::Set) {
+            for (const auto& item : symbol->meta.choices) {
+                if (auto result = claim(macro_name(*symbol, prefix, item)); !result) return result;
+            }
+        }
     }
-    return out;
+    return {};
 }
 
 /// @brief Quote @p value as a C string literal.
@@ -132,11 +144,14 @@ std::string cmake_quote(std::string_view value) {
 }  // namespace
 
 std::string macro_name(const Symbol& symbol, std::string_view prefix) {
-    return map_name(symbol.name, prefix);
+    // Export names are intentionally flat.  The canonical namespace remains
+    // in symbol.name for expressions, caches, and diagnostics; generated
+    // interfaces use the declaration spelling and reject duplicate exports.
+    return std::string{prefix} + symbol.raw_name;
 }
 
 std::string macro_name(const Symbol& symbol, std::string_view prefix, std::string_view item) {
-    return macro_name(symbol, prefix) + "_" + std::string{map_name(item, "")};
+    return macro_name(symbol, prefix) + "_" + std::string{item};
 }
 
 Result<std::string> render_header(const Runtime& runtime,
@@ -147,37 +162,12 @@ Result<std::string> render_header(const Runtime& runtime,
             ErrorCode::UnknownBackend, "render_header only emits header directives",
             directive.span));
     }
-    const std::string_view prefix =
-        directive.prefix.empty() ? std::string_view{"CONFIG_"}
-                                 : std::string_view{directive.prefix};
+    const std::string_view prefix = directive.prefix;
 
     const auto symbols = runtime.declared_symbols();
 
-    // Collision check first: a clash must be found before a byte is written.
-    std::unordered_map<std::string, std::string> claimed;
-    for (const auto* symbol : symbols) {
-        const auto claim = [&](std::string name) -> Result<void> {
-            const auto [it, inserted] = claimed.emplace(std::move(name), symbol->name);
-            if (!inserted) {
-                return std::unexpected(Diagnostic::error(
-                    ErrorCode::NamespaceCollision,
-                    "'" + symbol->name + "' and '" + it->second
-                        + "' both generate macro '" + it->first + "'",
-                    symbol->span));
-            }
-            return {};
-        };
-
-        if (auto first = claim(macro_name(*symbol, prefix)); !first) {
-            return std::unexpected(first.error());
-        }
-        if (symbol->type == ValueType::Enum || symbol->type == ValueType::Set) {
-            for (const auto& item : symbol->meta.choices) {
-                if (auto next = claim(macro_name(*symbol, prefix, item)); !next) {
-                    return std::unexpected(next.error());
-                }
-            }
-        }
+    if (auto checked = check_export_names(runtime, prefix); !checked) {
+        return std::unexpected(checked.error());
     }
 
     std::string out;
@@ -250,6 +240,7 @@ Result<std::string> render_header(const Runtime& runtime,
             case ValueType::Enum: {
                 const auto* selected =
                     std::get_if<std::string>(&current);
+                if (selected != nullptr) define(out, name, c_string(*selected));
                 for (const auto& item : symbol->meta.choices) {
                     const auto choice_name = macro_name(*symbol, prefix, item);
                     const bool on = selected != nullptr && *selected == item;
@@ -314,8 +305,9 @@ Result<void> generate_header(const Runtime& runtime,
 }
 
 Result<std::string> render_makefile(const Runtime& runtime,
-                                    std::string_view engine) {
+                                     std::string_view engine) {
     const auto symbols = runtime.declared_symbols();
+    if (auto checked = check_export_names(runtime); !checked) return std::unexpected(checked.error());
 
     std::string out;
     out += "# generated by zxconfig ";
@@ -323,7 +315,7 @@ Result<std::string> render_makefile(const Runtime& runtime,
     out += "; do not edit\n";
 
     for (const auto* symbol : symbols) {
-        const auto name = macro_name(*symbol, "CONFIG_");
+        const auto name = macro_name(*symbol, "");
         const auto* value = runtime.value(symbol->name);
         const EvalValue unset{std::monostate{}};
         const EvalValue& current = value != nullptr ? *value : unset;
@@ -403,6 +395,7 @@ Result<std::string> render_makefile(const Runtime& runtime,
 
 Result<std::string> render_json(const Runtime& runtime, std::string_view engine) {
     const auto symbols = runtime.declared_symbols();
+    if (auto checked = check_export_names(runtime); !checked) return std::unexpected(checked.error());
 
     std::string out;
     out += "{\n";
@@ -460,7 +453,7 @@ Result<std::string> render_json(const Runtime& runtime, std::string_view engine)
             }
         }
 
-        out += "    " + json_escape(symbol->name) + ": {\"type\": "
+        out += "    " + json_escape(symbol->raw_name) + ": {\"type\": "
              + json_escape(to_string(symbol->type)) + ", \"value\": " + rendered + "}";
         out += i + 1 < symbols.size() ? ",\n" : "\n";
     }
@@ -471,6 +464,7 @@ Result<std::string> render_json(const Runtime& runtime, std::string_view engine)
 
 Result<std::string> render_cmake(const Runtime& runtime, std::string_view engine) {
     const auto symbols = runtime.declared_symbols();
+    if (auto checked = check_export_names(runtime); !checked) return std::unexpected(checked.error());
 
     std::string out;
     out += "# generated by zxconfig ";
@@ -478,7 +472,7 @@ Result<std::string> render_cmake(const Runtime& runtime, std::string_view engine
     out += "; do not edit\n";
 
     for (const auto* symbol : symbols) {
-        const auto name = macro_name(*symbol, "CONFIG_");
+        const auto name = macro_name(*symbol, "");
         const auto* value = runtime.value(symbol->name);
         const EvalValue unset{std::monostate{}};
         const EvalValue& current = value != nullptr ? *value : unset;
@@ -546,16 +540,9 @@ Result<std::string> render_template(const Runtime& runtime, std::string_view tem
                         ErrorCode::Interpolation,
                         "unclosed '${' at byte " + std::to_string(at)));
                 }
-                const auto name = template_text.substr(at + 2, close - at - 2);
-                const auto* symbol = runtime.symbol(name);
-                if (symbol == nullptr) {
-                    return std::unexpected(Diagnostic::error(
-                        ErrorCode::Interpolation,
-                        "'${" + std::string{name} + "}' is not a declared symbol"));
-                }
-                const auto* value = runtime.value(symbol->name);
-                const EvalValue unset{std::monostate{}};
-                out += render_value(value != nullptr ? *value : unset, symbol->type);
+                auto value = runtime.expand_text(template_text.substr(at, close - at + 1));
+                if (!value) return std::unexpected(value.error());
+                out += *value;
                 at = close + 1;
                 continue;
             }
@@ -572,6 +559,11 @@ std::size_t run_generators(const Document& document,
                            std::vector<std::string>& failures) {
     std::size_t ok = 0;
     for (const auto& directive : document.generates) {
+        auto output_name = runtime.expand_text(directive.output, {}, directive.span);
+        if (!output_name) {
+            failures.push_back(directive.output + ": " + output_name.error().message);
+            continue;
+        }
         Result<std::string> rendered = std::unexpected(Diagnostic::error(
             ErrorCode::UnknownBackend, "no backend", directive.span));
         std::filesystem::path template_path;
@@ -590,7 +582,12 @@ std::size_t run_generators(const Document& document,
                 rendered = render_cmake(runtime, engine);
                 break;
             case GenerateDirective::Backend::Template: {
-                template_path = std::filesystem::path{directive.template_path};
+                auto template_name = runtime.expand_text(directive.template_path, {}, directive.span);
+                if (!template_name) {
+                    failures.push_back(directive.output + ": " + template_name.error().message);
+                    continue;
+                }
+                template_path = std::filesystem::path{*template_name};
                 if (template_path.is_relative() && !base.empty()) {
                     template_path = std::filesystem::path{std::string{base}} / template_path;
                 }
@@ -611,7 +608,7 @@ std::size_t run_generators(const Document& document,
             continue;
         }
 
-        std::filesystem::path output{directive.output};
+        std::filesystem::path output{*output_name};
         if (output.is_relative() && !base.empty()) {
             output = std::filesystem::path{std::string{base}} / output;
         }

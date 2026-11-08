@@ -51,15 +51,15 @@ option SMP : bool
     EXPECT_EQ(zxconfig::macro_name(*symbol, "CONFIG_"), "CONFIG_SMP");
 }
 
-TEST(MacroName, maps_namespaced_symbols_like_linux) {
+TEST(MacroName, preserves_flat_declaration_spelling) {
     Harness harness{R"(zxconfig 1.0
-option VIRTIO_NET : bool
+namespace arch
+option ArTargetCpu : bool
 )"};
-    const auto* symbol = harness.parsed.document.symbols.at("VIRTIO_NET");
-    // net.VIRTIO_NET would be the namespaced spelling; the raw name alone
-    // already exercises the same mapping.
-    EXPECT_EQ(zxconfig::macro_name(*symbol, "CONFIG_"), "CONFIG_VIRTIO_NET");
-    EXPECT_EQ(zxconfig::macro_name(*symbol, "CONFIG_", "m"), "CONFIG_VIRTIO_NET_M");
+    const auto* symbol = harness.parsed.document.symbols.at("arch.ArTargetCpu");
+    EXPECT_EQ(zxconfig::macro_name(*symbol, ""), "ArTargetCpu");
+    EXPECT_EQ(zxconfig::macro_name(*symbol, "CONFIG_"), "CONFIG_ArTargetCpu");
+    EXPECT_EQ(zxconfig::macro_name(*symbol, "", "s390x"), "ArTargetCpu_s390x");
 }
 
 TEST(HeaderEmission, booleans_follow_autoconf_semantics) {
@@ -71,9 +71,9 @@ generate header "config.h"
     ASSERT_TRUE(harness.runtime.evaluate().has_value());
     const auto out = harness.header();
 
-    EXPECT_TRUE(has(out, "#define CONFIG_ON 1"));
-    EXPECT_TRUE(has(out, "/* CONFIG_OFF is not set */"));
-    EXPECT_FALSE(has(out, "#define CONFIG_OFF"));
+    EXPECT_TRUE(has(out, "#define ON 1"));
+    EXPECT_TRUE(has(out, "/* OFF is not set */"));
+    EXPECT_FALSE(has(out, "#define OFF"));
 }
 
 TEST(HeaderEmission, tristates_emit_module_suffixed_macros) {
@@ -86,10 +86,10 @@ generate header "config.h"
     ASSERT_TRUE(harness.runtime.evaluate().has_value());
     const auto out = harness.header();
 
-    EXPECT_TRUE(has(out, "#define CONFIG_BUILTIN 1"));
-    EXPECT_TRUE(has(out, "#define CONFIG_MODULE_MODULE 1"));
-    EXPECT_FALSE(has(out, "#define CONFIG_MODULE 1"));
-    EXPECT_TRUE(has(out, "/* CONFIG_ABSENT is not set */"));
+    EXPECT_TRUE(has(out, "#define BUILTIN 1"));
+    EXPECT_TRUE(has(out, "#define MODULE_MODULE 1"));
+    EXPECT_FALSE(has(out, "#define MODULE 1"));
+    EXPECT_TRUE(has(out, "/* ABSENT is not set */"));
 }
 
 TEST(HeaderEmission, scalars_strings_and_lists) {
@@ -103,10 +103,10 @@ generate header "config.h"
     ASSERT_TRUE(harness.runtime.evaluate().has_value());
     const auto out = harness.header();
 
-    EXPECT_TRUE(has(out, "#define CONFIG_CPUS 4"));
-    EXPECT_TRUE(has(out, "#define CONFIG_BASE 0x1000"));
-    EXPECT_TRUE(has(out, "#define CONFIG_NAME \"say \\\"hi\\\"\\n\""));
-    EXPECT_TRUE(has(out, "#define CONFIG_FLAGS \"a b\""));
+    EXPECT_TRUE(has(out, "#define CPUS 4"));
+    EXPECT_TRUE(has(out, "#define BASE 0x1000"));
+    EXPECT_TRUE(has(out, "#define NAME \"say \\\"hi\\\"\\n\""));
+    EXPECT_TRUE(has(out, "#define FLAGS \"a b\""));
 }
 
 TEST(HeaderEmission, enums_and_sets_emit_one_define_per_choice) {
@@ -122,10 +122,10 @@ generate header "config.h"
     ASSERT_TRUE(harness.runtime.evaluate().has_value());
     const auto out = harness.header();
 
-    EXPECT_TRUE(has(out, "#define CONFIG_ARCH_X86_64 1"));
-    EXPECT_TRUE(has(out, "#define CONFIG_ARCH_ARM64 0"));
-    EXPECT_TRUE(has(out, "#define CONFIG_DEBUG_KASAN 1"));
-    EXPECT_TRUE(has(out, "#define CONFIG_DEBUG_LOCKDEP 0"));
+    EXPECT_TRUE(has(out, "#define ARCH_x86_64 1"));
+    EXPECT_TRUE(has(out, "#define ARCH_arm64 0"));
+    EXPECT_TRUE(has(out, "#define DEBUG_kasan 1"));
+    EXPECT_TRUE(has(out, "#define DEBUG_lockdep 0"));
 }
 
 TEST(HeaderEmission, honours_a_custom_prefix) {
@@ -141,7 +141,7 @@ generate header "config.h" { prefix "ZX_" }
 
 TEST(HeaderEmission, refuses_name_collisions) {
     // A choice macro and a flat symbol map to the same name: the choice
-    // `A_B` of X becomes CONFIG_X_A_B, and so does a symbol literally named
+    // `A_B` of X becomes X_A_B, and so does a symbol literally named
     // `X_A_B`.  Generation must refuse rather than emit two definitions.
     Harness harness{R"(zxconfig 1.0
 option X : enum = A { choices A | A_B }
@@ -154,6 +154,75 @@ generate header "config.h"
     auto rendered = zxconfig::render_header(harness.runtime, directive, "test");
     ASSERT_FALSE(rendered.has_value());
     EXPECT_EQ(rendered.error().code, zxconfig::ErrorCode::NamespaceCollision);
+}
+
+TEST(OtherBackends, refuse_flat_export_collisions_across_namespaces) {
+    Harness harness{R"(zxconfig 1.0
+namespace arch
+option SameName : bool = true
+)"};
+    zxconfig::Symbol second;
+    second.name = "net.SameName";
+    second.raw_name = "SameName";
+    harness.parsed.document.symbols.emplace(second.name, &second);
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    EXPECT_FALSE(zxconfig::render_header(harness.runtime, {}, "test").has_value());
+    EXPECT_FALSE(zxconfig::render_makefile(harness.runtime, "test").has_value());
+    EXPECT_FALSE(zxconfig::render_cmake(harness.runtime, "test").has_value());
+    EXPECT_FALSE(zxconfig::render_json(harness.runtime, "test").has_value());
+}
+
+TEST(OtherBackends, flat_names_and_interpolation_share_canonical_runtime_values) {
+    Harness harness{R"(zxconfig 1.0
+namespace arch
+option ArTargetCpu : enum = s390x { choices s390x | arm64 }
+computed ArDescription : string = "target ${ArTargetCpu} on ${HOST_OS}"
+)"};
+    ASSERT_TRUE(harness.parsed.ok());
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    auto header = zxconfig::render_header(harness.runtime, {}, "test");
+    auto json = zxconfig::render_json(harness.runtime, "test");
+    ASSERT_TRUE(header.has_value());
+    ASSERT_TRUE(json.has_value());
+    EXPECT_TRUE(has(*header, "#define ArTargetCpu \"s390x\""));
+    EXPECT_TRUE(has(*header, "#define ArTargetCpu_s390x 1"));
+    EXPECT_TRUE(has(*json, "\"ArTargetCpu\":"));
+    EXPECT_FALSE(has(*json, "\"arch.ArTargetCpu\":"));
+    auto text = harness.runtime.expand_text("CPU ${ArTargetCpu}", "arch.ArDescription");
+    ASSERT_TRUE(text.has_value());
+    EXPECT_EQ(*text, "CPU s390x");
+    auto rendered = zxconfig::render_template(harness.runtime, "${arch.ArTargetCpu}");
+    ASSERT_TRUE(rendered.has_value());
+    EXPECT_EQ(*rendered, "s390x");
+    ASSERT_TRUE(harness.runtime.set_user_value("arch.ArTargetCpu", "arm64").has_value());
+    text = harness.runtime.expand_text("CPU ${ArTargetCpu}", "arch.ArDescription");
+    ASSERT_TRUE(text.has_value());
+    EXPECT_EQ(*text, "CPU arm64");
+    const auto cache = harness.runtime.to_cache("manifest", std::string(64, 'a'));
+    ASSERT_EQ(cache.assignments.size(), 1u);
+    EXPECT_EQ(cache.assignments.front().symbol, "arch.ArTargetCpu");
+}
+
+TEST(OtherBackends, output_and_template_paths_expand_in_the_defining_file_scope) {
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "zxconfig-generator-scoped-paths";
+    fs::create_directories(dir);
+    std::ofstream{dir / "arm64.tpl"} << "target=${arch.Cpu}\n";
+    Harness harness{R"(zxconfig 1.0
+namespace arch
+option Cpu : string = "arm64"
+generate template "out/${Cpu}.txt" from "${Cpu}.tpl"
+)"};
+    ASSERT_TRUE(harness.parsed.ok());
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    std::vector<std::string> failures;
+    EXPECT_EQ(zxconfig::run_generators(harness.parsed.document, harness.runtime,
+                                      "test", dir.string(), failures), 1u);
+    EXPECT_TRUE(failures.empty());
+    std::ifstream input{dir / "out/arm64.txt"};
+    std::string rendered{std::istreambuf_iterator<char>{input}, {}};
+    EXPECT_EQ(rendered, "target=arm64\n");
+    fs::remove_all(dir);
 }
 
 TEST(HeaderEmission, writes_files_deterministically) {
@@ -183,7 +252,7 @@ generate header "config.h"
     EXPECT_EQ(first_text, second_text);
 
     // Sorted emission: A before B regardless of declaration order.
-    EXPECT_LT(first_text.find("CONFIG_A"), first_text.find("CONFIG_B"));
+    EXPECT_LT(first_text.find("#define A"), first_text.find("#define B"));
 
     // A relative output resolves against the base, not the working directory.
     directive.output = "relative.h";
@@ -210,13 +279,13 @@ generate makefile "config.mk"
     auto rendered = zxconfig::render_makefile(harness.runtime, "test");
     ASSERT_TRUE(rendered.has_value());
 
-    EXPECT_TRUE(has(*rendered, "CONFIG_ON=y"));
-    EXPECT_TRUE(has(*rendered, "# CONFIG_OFF is not set"));
-    EXPECT_TRUE(has(*rendered, "CONFIG_MOD=m"));
-    EXPECT_TRUE(has(*rendered, "CONFIG_CPUS=4"));
-    EXPECT_TRUE(has(*rendered, "CONFIG_NAME=a\\#b$$c"));
-    EXPECT_TRUE(has(*rendered, "CONFIG_FLAGS=x y"));
-    EXPECT_TRUE(has(*rendered, "CONFIG_ARCH=x86_64"));
+    EXPECT_TRUE(has(*rendered, "ON=y"));
+    EXPECT_TRUE(has(*rendered, "# OFF is not set"));
+    EXPECT_TRUE(has(*rendered, "MOD=m"));
+    EXPECT_TRUE(has(*rendered, "CPUS=4"));
+    EXPECT_TRUE(has(*rendered, "NAME=a\\#b$$c"));
+    EXPECT_TRUE(has(*rendered, "FLAGS=x y"));
+    EXPECT_TRUE(has(*rendered, "ARCH=x86_64"));
 }
 
 TEST(OtherBackends, json_uses_native_values) {
@@ -254,10 +323,10 @@ generate cmake "config.cmake"
     auto rendered = zxconfig::render_cmake(harness.runtime, "test");
     ASSERT_TRUE(rendered.has_value());
 
-    EXPECT_TRUE(has(*rendered, "set(CONFIG_ON ON)"));
-    EXPECT_TRUE(has(*rendered, "set(CONFIG_OFF OFF)"));
-    EXPECT_TRUE(has(*rendered, "set(CONFIG_MOD \"m\")"));
-    EXPECT_TRUE(has(*rendered, "set(CONFIG_NAME \"say \\\"hi\\\"\")"));
+    EXPECT_TRUE(has(*rendered, "set(ON ON)"));
+    EXPECT_TRUE(has(*rendered, "set(OFF OFF)"));
+    EXPECT_TRUE(has(*rendered, "set(MOD \"m\")"));
+    EXPECT_TRUE(has(*rendered, "set(NAME \"say \\\"hi\\\"\")"));
 }
 
 TEST(OtherBackends, templates_interpolate_symbols) {

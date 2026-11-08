@@ -3,7 +3,7 @@ zxconfig 1.0
 # ZXConfig demo manifest — exercises every language feature and every
 # interface surface.  Run `zxconfig` in this directory and go.
 
-include "arch.zx" as arch
+include "arch.zx"
 
 # ── General setup ───────────────────────────────────────────────────────
 

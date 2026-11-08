@@ -14,8 +14,8 @@
 namespace zxconfig {
 
 /// @brief The macro name of one symbol under @p prefix.
-/// @param[in] symbol  The symbol.  Its full namespaced name is mapped.
-/// @param[in] prefix  Macro prefix, e.g. "CONFIG_".  May be empty.
+/// @param[in] symbol  The symbol.  Its declaration spelling is preserved.
+/// @param[in] prefix  Explicit prefix, e.g. "CONFIG_".  Empty by default.
 [[nodiscard]] std::string macro_name(const Symbol& symbol, std::string_view prefix);
 
 /// @brief The macro name of one choice or set member of @p symbol.

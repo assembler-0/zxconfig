@@ -46,11 +46,11 @@ ValueType type_of(TokenKind kind) noexcept {
 bool is_builtin(std::string_view name) noexcept {
     return name == "shell" || name == "env" || name == "is_defined"
         || name == "defined_and_true" || name == "abs" || name == "min"
-        || name == "max" || name == "log2";
+        || name == "max" || name == "log2" || name == "contains" || name == "type_of";
 }
 
 std::size_t builtin_arity(std::string_view name) noexcept {
-    return (name == "min" || name == "max") ? 2 : 1;
+    return (name == "min" || name == "max" || name == "contains") ? 2 : 1;
 }
 
 /// @brief Binding strength of a binary operator.  Higher binds tighter.
@@ -138,15 +138,15 @@ public:
 
     /// @brief Parse one file into @p insert.  Returns false when the file
     ///        could not be lexed or has no version header.
-    bool parse_file(std::uint32_t file_id, Menu& insert, std::string ns, std::uint32_t depth) {
+    bool parse_file(std::uint32_t file_id, Menu& insert, std::uint32_t depth,
+                    std::string* declared_namespace = nullptr) {
         if (depth > k_max_include_depth) {
             out_.diagnostics.push_back(Diagnostic::error(
                 ErrorCode::CircularDependency,
                 "include depth exceeds " + std::to_string(k_max_include_depth)));
             return false;
         }
-        if (std::find(parsing_.begin(), parsing_.end(),
-                      std::pair{file_id, std::string{ns}}) != parsing_.end()) {
+        if (std::find(parsing_.begin(), parsing_.end(), file_id) != parsing_.end()) {
             out_.diagnostics.push_back(Diagnostic::warning(
                 ErrorCode::AlreadyLoaded,
                 "include cycle: '" + std::string{arena_.find(file_id)->path}
@@ -154,7 +154,7 @@ public:
             return false;
         }
 
-        parsing_.emplace_back(file_id, std::string{ns});
+        parsing_.push_back(file_id);
         macro_scopes_.emplace_back();
 
         struct Pop {
@@ -163,6 +163,7 @@ public:
             std::size_t saved_pos;
             std::uint32_t saved_file;
             std::string saved_ns;
+            std::uint32_t saved_depth;
 
             ~Pop() {
                 p->parsing_.pop_back();
@@ -180,8 +181,9 @@ public:
                 p->pos_ = saved_pos;
                 p->file_id_ = saved_file;
                 p->ns_ = std::move(saved_ns);
+                p->depth_ = saved_depth;
             }
-        } pop_guard{this, std::move(lexed_), pos_, file_id_, std::move(ns_)};
+        } pop_guard{this, std::move(lexed_), pos_, file_id_, std::move(ns_), depth_};
 
         auto lexed = lex(arena_, file_id);
         bool ok = true;
@@ -191,13 +193,21 @@ public:
         }
 
         file_id_ = file_id;
-        ns_ = std::move(ns);
+        ns_.clear();
         depth_ = depth;
         lexed_ = std::move(lexed);
         toks_ = &lexed_.tokens;
         pos_ = 0;
 
         if (!parse_header()) return false;
+        if (accept(TokenKind::KwNamespace)) {
+            auto declared = parse_name("namespace");
+            if (!declared) return false;
+            ns_ = std::move(*declared);
+            (void)accept(TokenKind::Semicolon);
+        }
+        out_.document.file_namespaces[file_id_] = ns_;
+        if (declared_namespace != nullptr) *declared_namespace = ns_;
         parse_statements(insert, false);
         return ok;
     }
@@ -206,6 +216,22 @@ public:
     void link() { link_menu(*out_.document.root); }
 
 private:
+    std::optional<std::string> parse_name(std::string_view context) {
+        if (!expect(TokenKind::Id, context)) return std::nullopt;
+        std::string name{lexed_.spelling(previous())};
+        while (accept(TokenKind::Dot)) {
+            if (!expect(TokenKind::Id, context)) return std::nullopt;
+            name += ".";
+            name += lexed_.spelling(previous());
+        }
+        return name;
+    }
+
+    std::string local_name(std::string name) const {
+        return ns_.empty() || name.find('.') != std::string::npos
+            ? name : ns_ + "." + name;
+    }
+
     [[nodiscard]] const Token& peek(std::size_t ahead = 0) const noexcept {
         const auto& tokens = *toks_;
         const auto index = pos_ + ahead;
@@ -392,6 +418,9 @@ private:
 
         if (!expect(TokenKind::Id, "option")) { sync_statement(); return; }
         symbol.raw_name = std::string{lexed_.spelling(previous())};
+        if (symbol.raw_name.starts_with("HOST_")) {
+            fail(ErrorCode::DuplicateSymbol, "HOST_ names are reserved for host builtins", previous().span);
+        }
         symbol.name = ns_.empty() ? symbol.raw_name : ns_ + "." + symbol.raw_name;
 
         if (!parse_type(symbol)) { sync_statement(); return; }
@@ -428,13 +457,15 @@ private:
 
         if (!expect(TokenKind::Id, "computed")) { sync_statement(); return; }
         symbol.raw_name = std::string{lexed_.spelling(previous())};
+        if (symbol.raw_name.starts_with("HOST_")) {
+            fail(ErrorCode::DuplicateSymbol, "HOST_ names are reserved for host builtins", previous().span);
+        }
         symbol.name = ns_.empty() ? symbol.raw_name : ns_ + "." + symbol.raw_name;
 
         if (!parse_type(symbol)) { sync_statement(); return; }
 
         if (accept(TokenKind::Eq)) {
-            // Same default grammar as options: set and list literals are not
-            // expressions, and computed sets and lists need them.
+            // Computed and configurable symbols share the expression grammar.
             auto value = parse_default_value(symbol.type);
             if (value != nullptr) {
                 symbol.meta.defaults.emplace_back(std::move(value), nullptr);
@@ -484,15 +515,18 @@ private:
         if (!expect(TokenKind::String, "include")) { sync_statement(); return; }
         const auto path = std::string{lexed_.spelling(previous())};
 
+        if (check(TokenKind::Id) && lexed_.spelling(peek()) == "as") {
+            fail(ErrorCode::UnsupportedConstruct,
+                 "include 'as' was removed; declare 'namespace NAME' after the included file's version header",
+                 peek().span);
+            advance();
+            (void)parse_name("removed include alias");
+        }
+
         IncludeDirective directive;
         directive.path = path;
         directive.span = {begin, peek().span.begin};
 
-        if (accept(TokenKind::KwAs)) {
-            if (expect(TokenKind::Id, "include")) {
-                directive.namespace_ = std::string{lexed_.spelling(previous())};
-            }
-        }
         if (accept(TokenKind::KwVisible)) {
             directive.condition = parse_expression();
         }
@@ -518,22 +552,23 @@ private:
         directive.resolved = arena_.find(*loaded)->canonical;
 
         const bool already_loaded = arena_.count() == before;
-        if (already_loaded && directive.namespace_.empty()) {
+        if (already_loaded) {
             out_.diagnostics.push_back(Diagnostic::warning(
                 ErrorCode::AlreadyLoaded,
-                "'" + path + "' is included more than once without a namespace; skipped",
+                "'" + path + "' is included more than once; skipped",
                 directive.span));
             out_.document.includes.push_back(std::move(directive));
             return;
         }
 
+        std::string included_namespace;
         if (directive.condition == nullptr) {
-            parse_file(*loaded, parent, directive.namespace_, depth_ + 1);
+            parse_file(*loaded, parent, depth_ + 1, &included_namespace);
         } else {
             // Parse into a scratch menu, fold the condition into every child,
             // then splice.  The scratch menu itself never reaches the tree.
             Menu scratch;
-            if (parse_file(*loaded, scratch, directive.namespace_, depth_ + 1)) {
+            if (parse_file(*loaded, scratch, depth_ + 1, &included_namespace)) {
                 for (auto& child : scratch.children) {
                     if (auto* symbol = std::get_if<Symbol>(&child)) {
                         fold_condition(*condition_copy, symbol->meta.visible);
@@ -544,6 +579,7 @@ private:
                 }
             }
         }
+        directive.namespace_ = std::move(included_namespace);
         out_.document.includes.push_back(std::move(directive));
     }
 
@@ -647,12 +683,14 @@ private:
         AliasDirective alias;
         alias.span.begin = begin;
 
-        if (!expect(TokenKind::Id, "alias")) { sync_statement(); return; }
-        alias.alias = std::string{lexed_.spelling(previous())};
+        auto alias_name = parse_name("alias");
+        if (!alias_name) { sync_statement(); return; }
+        alias.alias = local_name(std::move(*alias_name));
 
         if (!expect(TokenKind::Eq, "alias")) { sync_statement(); return; }
-        if (!expect(TokenKind::Id, "alias")) { sync_statement(); return; }
-        alias.target = std::string{lexed_.spelling(previous())};
+        auto target = parse_name("alias target");
+        if (!target) { sync_statement(); return; }
+        alias.target = local_name(std::move(*target));
 
         alias.span.end = peek().span.begin;
         out_.document.aliases.push_back(std::move(alias));
@@ -665,12 +703,14 @@ private:
         DeprecatedDirective directive;
         directive.span.begin = begin;
 
-        if (!expect(TokenKind::Id, "deprecated")) { sync_statement(); return; }
-        directive.old_name = std::string{lexed_.spelling(previous())};
+        auto old_name = parse_name("deprecated");
+        if (!old_name) { sync_statement(); return; }
+        directive.old_name = local_name(std::move(*old_name));
 
         if (!expect(TokenKind::Arrow, "deprecated")) { sync_statement(); return; }
-        if (!expect(TokenKind::Id, "deprecated")) { sync_statement(); return; }
-        directive.new_name = std::string{lexed_.spelling(previous())};
+        auto new_name = parse_name("deprecated replacement");
+        if (!new_name) { sync_statement(); return; }
+        directive.new_name = local_name(std::move(*new_name));
 
         if (accept(TokenKind::LBrace)) {
             while (!check(TokenKind::RBrace) && !check(TokenKind::End)) {
@@ -876,6 +916,7 @@ private:
         toks_ = &lexed_.tokens;
         pos_ = 0;
         file_id_ = *admitted;
+        out_.document.file_namespaces[file_id_] = ns_;
         ++expansion_depth_;
 
         parse_statements(into, false);
@@ -1115,10 +1156,11 @@ private:
     }
 
     void parse_conflict(Metadata& meta) {
-        if (!expect(TokenKind::Id, "conflict")) { sync_metadata(); return; }
+        auto target = parse_name("conflict");
+        if (!target) { sync_metadata(); return; }
 
         ConflictClause clause;
-        clause.symbol = std::string{lexed_.spelling(previous())};
+        clause.symbol = local_name(std::move(*target));
 
         if (accept(TokenKind::LBrace)) {
             while (!check(TokenKind::RBrace) && !check(TokenKind::End)) {
@@ -1185,11 +1227,8 @@ private:
         }
     }
 
-    /// @brief Parse the default for @p type.  Set and list literals are not
-    ///        expressions, so they get their own shape here.
-    ExprPtr parse_default_value(ValueType type) {
-        if (type == ValueType::Set) return parse_sequence(TokenKind::LBrace, TokenKind::RBrace);
-        if (type == ValueType::List) return parse_sequence(TokenKind::LBracket, TokenKind::RBracket);
+    /// @brief Every default accepts the same expression grammar.
+    ExprPtr parse_default_value(ValueType) {
         return parse_expression();
     }
 
@@ -1199,11 +1238,12 @@ private:
 
         auto node = std::make_unique<Expr>();
         node->kind = ExprKind::SequenceLit;
+        node->op.kind = open;
         node->span.begin = begin;
 
         while (!check(close) && !check(TokenKind::End)) {
             auto item = parse_expression();
-            if (item == nullptr) { advance(); continue; }
+            if (item == nullptr) return nullptr;
             node->args.push_back(std::move(item));
             if (!accept(TokenKind::Comma)) break;
         }
@@ -1332,8 +1372,9 @@ private:
                 return node;
             }
             case TokenKind::Id: {
-                advance();
-                const auto name = lexed_.spelling(token);
+                auto parsed_name = parse_name("expression");
+                if (!parsed_name) return nullptr;
+                const auto& name = *parsed_name;
                 if (name == "true" || name == "false") {
                     auto node = std::make_unique<Expr>();
                     node->kind = ExprKind::BoolLit;
@@ -1344,7 +1385,7 @@ private:
                 if (check(TokenKind::LParen)) return parse_call(token);
                 auto node = std::make_unique<Expr>();
                 node->kind = ExprKind::Ident;
-                node->span = token.span;
+                node->span = {token.span.begin, previous().span.end};
                 node->text = std::string{name};
                 return node;
             }
@@ -1356,6 +1397,22 @@ private:
                 inner->span.end = peek(0).span.begin;
                 return inner;
             }
+            case TokenKind::Dollar: {
+                advance();
+                if (!expect(TokenKind::LBrace, "variable reference")) return nullptr;
+                auto name = parse_name("variable reference");
+                if (!name || !expect(TokenKind::RBrace, "variable reference")) return nullptr;
+                auto node = std::make_unique<Expr>();
+                node->kind = ExprKind::Ident;
+                node->op.kind = TokenKind::Dollar;
+                node->span = {token.span.begin, previous().span.end};
+                node->text = std::move(*name);
+                return node;
+            }
+            case TokenKind::LBrace:
+                return parse_sequence(TokenKind::LBrace, TokenKind::RBrace);
+            case TokenKind::LBracket:
+                return parse_sequence(TokenKind::LBracket, TokenKind::RBracket);
             default:
                 fail(ErrorCode::UnexpectedToken,
                      std::string{"expected an expression, found "} + to_string(token.kind),
@@ -1428,7 +1485,7 @@ private:
     std::string ns_;
     std::uint32_t depth_{0};
     std::uint32_t expansion_depth_{0};
-    std::vector<std::pair<std::uint32_t, std::string>> parsing_;
+    std::vector<std::uint32_t> parsing_;
     std::vector<std::unordered_map<std::string, Macro>> macro_scopes_;
     DocumentStats stats_;
 };
@@ -1481,7 +1538,7 @@ ParseResult parse_document(SourceArena& arena,
                            std::string_view root) {
     ParseResult result;
     Parser parser{result, arena, root};
-    parser.parse_file(file_id, *result.document.root, {}, 0);
+    parser.parse_file(file_id, *result.document.root, 0);
     parser.link();
     return result;
 }

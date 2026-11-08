@@ -64,7 +64,7 @@ struct Detail {
     std::string range;        ///< "1 .. 512" or empty
     std::string choices;      ///< comma-joined or empty
     std::string source;       ///< "file:line" or empty
-    std::string exported;     ///< name in the generated outputs, e.g. CONFIG_FOO
+    std::string exported;     ///< flat declaration spelling in generated outputs
     std::uint8_t flags{0};
 };
 

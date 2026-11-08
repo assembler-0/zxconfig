@@ -222,17 +222,68 @@ computed LIB_DIR : string = "${PREFIX}/lib/${ARCH}"
 ---
 
 ## Includes and namespacing
+
+The defining file owns its namespace. Put one optional `namespace` declaration
+immediately after its version header. Without it, the file declares global
+symbols. Namespaces are case-sensitive and may contain dotted segments.
+
 ```c
-include "arch/x86/Kconfig"
-include "drivers/net/Kconfig" as net        # net.VIRTIO_NET etc.
-include "drivers/net/Kconfig" visible NET   # conditional include
+# arch/arch.zx
+zxconfig 1.0
+namespace arch
+option ArTargetCpu : enum = s390x { choices s390x | arm64 }
+computed ArIsS390 : bool = ArTargetCpu == s390x
 ```
+
+Inside this file `ArTargetCpu` resolves to `arch.ArTargetCpu`. Other files
+reference `arch.ArTargetCpu` explicitly. Unqualified references first search
+their defining file's namespace, then global symbols. An include does not
+inherit its importer's namespace. The removed `include ... as ...` syntax
+reports a migration error.
+
+```c
+# ZXConfig
+zxconfig 1.0
+include "arch/arch.zx"
+include "s390x/s390x.zx" visible arch.ArTargetCpu == s390x
+```
+
+Every included file must exist and have a version header, even if its
+visibility condition is false. Files are parsed once; `visible` controls
+presentation and inherits through included menus and options. Editing the
+architecture re-evaluates visibility and redraws the TUI without re-parsing.
+Hidden options retain their values. A bare `visible arch.ArTargetCpu` checks
+whether the value is nonempty; use `== s390x` to choose one architecture.
+
+Internal identities and cache assignments use `arch.ArTargetCpu`. Generated
+headers, Makefiles, CMake files, and JSON use the flat declaration spelling
+`ArTargetCpu`, preserving case and adding no implicit `CONFIG_` prefix.
+Header generation still accepts an explicit `prefix "CONFIG_"` option.
+Enum/set member flags use `ArTargetCpu_s390x`; tristate module flags use
+`Name_MODULE`. Collisions between exported names, including generated flags,
+are errors in every structured output backend.
 
 ---
 
 ## Host awareness (probing)
 
-Probe expressions now accept a `fallback` clause so parse-time failures are deterministic.
+The read-only builtins `HOST_OS`, `HOST_ARCH`, `HOST_KERNEL`, and `HOST_NODE`
+describe the running host (`uname` system name, machine, kernel release, and
+node name). They are fixed for the process, are not target architecture
+settings, and are not automatically exported or cached. `HOST_` declaration
+names are reserved. OS names use system spelling, e.g. `"Linux"`, `"Darwin"`,
+or `"FreeBSD"`.
+
+```c
+computed HostPlatform : string = HOST_OS
+computed QueryResult : string = HOST_OS == "Linux"
+    ? shell("uname -m") : shell("uname -p") fallback "unknown"
+```
+
+Probe expressions accept a `fallback` clause for evaluation failures. Only
+the selected ternary branch runs. `shell` and `env` expand `${NAME}` in their
+string argument before querying; probe results are memoized by expanded
+command/name.
 ```c
 option HOSTNAME : string = shell("hostname") fallback "localhost" {
     label "Host system name"
@@ -252,6 +303,18 @@ option CLANG_VERSION : string = shell("clang --version | head -1") fallback "" {
 ---
 
 ## String interpolation
+
+`${NAME}` uses the same file-local/qualified/global lookup as expressions.
+References in string values, labels, help, menu labels, validation messages,
+queries, template bodies, and generated output/template paths expand from
+the current runtime values. Bare `${NAME}` is also a typed expression
+reference, so `visible ${arch.ArTargetCpu} == s390x` is valid.
+
+Declaration names and include paths remain static. Macro parameter expansion
+can construct declarations before parsing, but ordinary value changes do
+not rename symbols or change the loaded file graph. This preserves cache
+identities and avoids rebuilding a different language program on every edit.
+
 ```c
 option PREFIX : string = "/usr/local"
 
@@ -329,6 +392,32 @@ generate template "config.ld" from "scripts/linker.ld.tpl" {
 ---
 
 ## Advanced expressions
+
+All expression fields share one grammar: defaults, `visible`, `when`,
+`enabled`, `implies`, inline `warn`, and top-level `warn`/`validate`.
+Scalar equality supports numbers, strings, and enums. `{a, b}` denotes a set;
+set equality ignores order and duplicate members. `["a", "b"]` denotes a
+list; list equality preserves order. Comparing a set with a list is a type
+error. Collection ordering (`<`, `>`, etc.)
+is unsupported. `contains(Flags, kasan)` tests membership and
+`type_of(Flags) == "set"` tests the declared type. Quote arbitrary string
+literals; bare enum/set choice names must be declared in `choices`.
+
+```c
+option Features : set = {kasan} { choices kasan | ubsan }
+option DebugInfo : bool = true {
+    visible Features == {ubsan, kasan}
+    enabled contains(Features, kasan)
+    warn Features == {} : "No debug features selected"
+}
+validate "Both features are required" { Features == {kasan, ubsan} }
+```
+
+Inline `warn EXPR : "message"` reports when EXPR is true. Top-level
+`warn "message" { EXPR }` and `validate "message" { EXPR }` are assertions
+and report when EXPR is false. Conditions use truthiness: positive numbers,
+nonempty strings/enums, and nonempty collections are true. Logical operators
+short-circuit when the result is determined and retain tristate semantics.
 
 Bitwise operators, arithmetic, and builtin functions. `shell` and `env` are also valid in expression context (not just defaults).
 ```c

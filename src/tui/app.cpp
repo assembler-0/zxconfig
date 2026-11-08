@@ -442,7 +442,17 @@ private:
             // Dispatch at the popup's interactive component, not at the
             // Renderer wrapper: a plain Renderer is a view and drops events,
             // which silently killed every key and button in every popup.
-            if (popup_events_ != nullptr && popup_events_->OnEvent(event)) return true;
+            Component events = popup_events_;
+            if (events != nullptr && events->OnEvent(event)) {
+                // Radiobox consumes Enter to select its focused entry.  It
+                // still needs to commit that value, unless a button callback
+                // already closed or replaced the popup during dispatch.
+                if (popup_ == popup && popup_kind_ == Popup::Choice
+                    && event == Event::Return) {
+                    commit_popup();
+                }
+                return true;
+            }
             // Enter applies whatever the popup holds when the popup did not
             // consume it itself: choosers and checkboxes commit here.
             if (event == Event::Return) { commit_popup(); return true; }
