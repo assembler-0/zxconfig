@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace ipc
+menu "Interprocess communication" {
+    option IpcSubsystem : bool = true { enabled mm.MemorySubsystem }
+    menu "IPC banks" visible IpcSubsystem {
+        utils.STRESS_BANK(IpcA, "IPC / bank A")
+        utils.STRESS_BANK(IpcB, "IPC / bank B")
+    }
+}

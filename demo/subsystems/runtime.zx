@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace runtime
+menu "Runtime services" {
+    option RuntimeSubsystem : bool = true { enabled net.NetSubsystem and fs.FsSubsystem }
+    menu "Runtime banks" visible RuntimeSubsystem {
+        utils.STRESS_BANK(RtA, "Runtime / bank A")
+        utils.STRESS_BANK(RtB, "Runtime / bank B")
+    }
+}

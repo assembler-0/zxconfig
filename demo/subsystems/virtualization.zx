@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace virt
+menu "Virtualization" {
+    option VirtSubsystem : bool = true { enabled arch.BenchHasVirtualization }
+    menu "Virtualization banks" visible VirtSubsystem {
+        utils.STRESS_BANK(VirtA, "Virtualization / bank A")
+        utils.STRESS_BANK(VirtB, "Virtualization / bank B")
+    }
+}

@@ -23,7 +23,9 @@ cmake --install build
 cd demo && ../build/zxconfig
 ```
 
-60 symbols across 8 menus: types, macros, file namespaces, five generators.
+16,755 symbols and 2,622 menus: nested subsystem forests, architecture
+switching, recursive macros, and a 256-hop dependency chain. See the
+[stress demo](demo/README.md) for presets and repeatable benchmarks.
 
 ## Use it
 
@@ -38,6 +40,7 @@ zxconfig --preset ci --generate       # CI: no interface, no interaction
 - [doc/cli.md](doc/cli.md) — the complete command line
 - [doc/cache.md](doc/cache.md) — the cache and presets
 - [doc/language.md](doc/language.md) — the language specification
+- [doc/dsl-review.md](doc/dsl-review.md) — remaining language consistency and stability gaps
 
 ## License
 

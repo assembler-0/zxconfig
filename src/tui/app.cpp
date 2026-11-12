@@ -552,7 +552,7 @@ private:
         if (event.input() == "q") {
             // Unsaved means changed since the last save, not "has values":
             // a save followed by q must exit without a prompt.
-            if (dirty_ && !quit_confirmed_) {
+            if (controller_.dirty() && !quit_confirmed_) {
                 message_ = "there are unsaved changes. press q again to quit anyway.";
                 popup_kind_ = Popup::Message;
                 open_popup();
@@ -628,7 +628,6 @@ private:
         if (event.input() == "s") {
             auto refusal = controller_.save();
             if (refusal.empty()) {
-                dirty_ = false;
                 // Saving is otherwise silent; say it happened.
                 message_ = "saved.";
                 popup_kind_ = Popup::Message;
@@ -643,7 +642,6 @@ private:
             if (!refusal.empty()) {
                 refuse(refusal);
             } else {
-                dirty_ = true;
                 message_ = "cache applied.";
                 popup_kind_ = Popup::Message;
                 open_popup();
@@ -719,10 +717,9 @@ private:
 
     /// @brief Show a refused action instead of ignoring it.  Silence on a
     ///        refusal reads as a dead key.  An empty result is a successful
-    ///        mutation and marks the configuration dirty.
+    ///        mutation; the controller marks the state dirty.
     void refuse(std::string refusal) {
         if (refusal.empty()) {
-            dirty_ = true;
             maybe_prompt();
             return;
         }
@@ -1150,7 +1147,6 @@ private:
             refuse(refusal);
             return;
         }
-        dirty_ = true;
         message_ = "preset loaded: " + clip(path, 44);
         popup_kind_ = Popup::Message;
         open_popup();
@@ -1166,7 +1162,7 @@ private:
             if (state.focused) element |= underlined;
             return element;
         };
-        input_ = Input(&preset_query_, "presets/ci.zxconfig", option);
+        input_ = Input(&preset_query_, "preset name or path", option);
 
         auto buttons = buttons_row({
             {"Load", [this] { apply_preset(); }},
@@ -1199,14 +1195,14 @@ private:
                                 // The selected entry scrolls when it
                                 // overflows; the rest stay put.
                                 const auto name = selected
-                                    ? marquee("presets/" + preset_hits_[i], 54)
-                                    : clip("presets/" + preset_hits_[i], 54);
+                                    ? marquee(preset_hits_[i], 54)
+                                    : clip(preset_hits_[i], 54);
                                 auto line = hbox({text(marker), text(name) | bold});
                                 lines.push_back(selected ? line | bold : line);
                             }
                             if (preset_hits_.empty()) {
                                 lines.push_back(
-                                    text("  no presets in presets/ — type a path") | dim);
+                                    text("  no presets found — type a name or path") | dim);
                             }
                             while (lines.size() < 12) lines.push_back(text(std::string{}));
                             return vbox(std::move(lines));
@@ -1321,7 +1317,6 @@ private:
     std::vector<std::string> validation_text_;
 
     bool quit_confirmed_{false};
-    bool dirty_{false};
     std::string message_;
 
     std::string search_query_;

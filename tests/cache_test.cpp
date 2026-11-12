@@ -23,7 +23,7 @@ TEST(Sha256, matches_a_known_digest) {
 TEST(CacheFormat, round_trips_assignments) {
     zxconfig::CacheDocument document;
     document.manifest = "/src/ZXConfig";
-    document.manifest_digest = zxconfig::sha256_hex("zxconfig 1.0\n");
+    document.manifest_digest = zxconfig::sha256_hex("zxconfig 1.1\n");
     document.assignments.push_back({"SMP", "true", zxconfig::ValueType::Bool});
     document.assignments.push_back({"VERSION", "6.1 \"rc\"", zxconfig::ValueType::String});
     document.assignments.push_back({"BASE", "0xFFFF", zxconfig::ValueType::Hex});
@@ -128,6 +128,47 @@ TEST(CacheStore, reports_a_missing_cache) {
     EXPECT_EQ(loaded.error().code, zxconfig::ErrorCode::CacheMissing);
 }
 
+TEST(PresetPaths, ordered_directories_replace_default_and_empty_means_root) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-preset-search";
+    fs::create_directories(dir / "first");
+    fs::create_directories(dir / "second");
+    fs::create_directories(dir / "presets");
+    const auto manifest = dir / "ZXConfig";
+    std::ofstream{dir / "first/ci.zxconfig"} << "zxcache 1\n";
+    std::ofstream{dir / "second/ci.zxconfig"} << "zxcache 1\n";
+    std::ofstream{dir / "second/custom"} << "zxcache 1\n";
+    std::ofstream{dir / "presets/legacy.zxconfig"} << "zxcache 1\n";
+    std::ofstream{dir / "local.zxconfig"} << "zxcache 1\n";
+    fs::create_directory(dir / "first/custom");
+    const std::vector<std::string> paths{"missing", "first", "second"};
+    EXPECT_EQ(zxconfig::resolve_preset("ci", manifest, paths), dir / "first/ci.zxconfig");
+    EXPECT_EQ(zxconfig::resolve_preset("custom", manifest, paths), dir / "second/custom");
+    EXPECT_EQ(zxconfig::resolve_preset("local", manifest, paths), dir / "local.zxconfig");
+    EXPECT_EQ(zxconfig::resolve_preset("legacy", manifest, paths), dir / "legacy");
+    EXPECT_EQ(zxconfig::resolve_preset("legacy", manifest), dir / "presets/legacy.zxconfig");
+    EXPECT_EQ(zxconfig::resolve_preset("local", manifest, std::vector<std::string>{""}), dir / "local.zxconfig");
+    EXPECT_EQ(zxconfig::resolve_preset((dir / "second/ci.zxconfig").string(), manifest, paths),
+              dir / "second/ci.zxconfig");
+    fs::remove_all(dir);
+}
+
+TEST(PresetPaths, discovery_keeps_exact_paths_and_order_without_lock_files) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-preset-discovery";
+    fs::create_directories(dir / "a");
+    fs::create_directories(dir / "b");
+    std::ofstream{dir / "a/ci.zxconfig"} << "zxcache 1\n";
+    std::ofstream{dir / "a/ci.zxconfig.lock"} << "";
+    std::ofstream{dir / "a/notes.md"} << "not a preset";
+    std::ofstream{dir / "b/ci.zxconfig"} << "zxcache 1\n";
+    const std::vector<std::string> paths{"missing", "a", "a", (dir / "b").string()};
+    const auto found = zxconfig::discover_presets(dir / "ZXConfig", paths);
+    ASSERT_EQ(found.size(), 2u);
+    EXPECT_EQ(found[0], (dir / "a/ci.zxconfig").string());
+    EXPECT_EQ(found[1], (dir / "b/ci.zxconfig").string());
+    EXPECT_EQ(zxconfig::resolve_preset(found[1], dir / "ZXConfig", paths), dir / "b/ci.zxconfig");
+    fs::remove_all(dir);
+}
+
 TEST(Reconcile, absent_resets_and_clean_applies) {
     zxconfig::CacheDocument document;
     document.assignments.push_back({"SMP", "true", zxconfig::ValueType::Bool});
@@ -189,9 +230,40 @@ TEST(CacheLock, is_exclusive) {
     fs::remove_all(dir);
 }
 
+TEST(CacheStore, locked_persistence_refuses_a_held_lock_and_stores_when_free) {
+    // One persistence core for every writer: it takes the lock, then the
+    // atomic store happens under it.
+    const auto dir = fs::temp_directory_path() / "zxconfig-store-locked-test";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    const auto path = dir / ".zxconfig.cache";
+
+    zxconfig::CacheDocument document;
+    document.manifest = (dir / "ZXConfig").string();
+    document.manifest_digest = zxconfig::sha256_hex("manifest");
+    document.assignments.push_back({"SMP", "true", zxconfig::ValueType::Bool});
+
+    auto held = zxconfig::CacheLock::acquire(path, 0);
+    ASSERT_TRUE(held.has_value()) << held.error().message;
+    auto busy = zxconfig::store_cache_locked(path, document, 0);
+    ASSERT_FALSE(busy.has_value());
+    EXPECT_EQ(busy.error().code, zxconfig::ErrorCode::LockBusy);
+    EXPECT_FALSE(fs::exists(path));
+
+    held->release();
+    auto stored = zxconfig::store_cache_locked(path, document, 0);
+    ASSERT_TRUE(stored.has_value()) << stored.error().message;
+    EXPECT_FALSE(fs::exists(path.string() + ".tmp"));
+    auto loaded = zxconfig::load_cache(path, document.manifest_digest);
+    ASSERT_TRUE(loaded.has_value()) << loaded.error().message;
+    EXPECT_EQ(loaded->find("SMP")->value, "true");
+
+    fs::remove_all(dir);
+}
+
 TEST(Digest, changes_when_content_or_order_changes) {
-    const std::string_view one[] = {"a.zx", "zxconfig 1.0\n"};
-    const std::string_view two[] = {"a.zx", "zxconfig 1.1\n"};
+    const std::string_view one[] = {"a.zx", "zxconfig 1.1\n"};
+    const std::string_view two[] = {"a.zx", "zxconfig 1.0\n"};
     const std::string_view swapped[] = {"zxconfig 1.0\n", "a.zx"};
 
     const auto base = zxconfig::digest_manifest(one);

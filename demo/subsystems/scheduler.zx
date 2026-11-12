@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace sched
+menu "Scheduling" {
+    option SchedulerSubsystem : bool = true { enabled arch.BenchSmp }
+    menu "Scheduler banks" visible SchedulerSubsystem {
+        utils.STRESS_BANK(SchedA, "Scheduling / bank A")
+        utils.STRESS_BANK(SchedB, "Scheduling / bank B")
+    }
+}

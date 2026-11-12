@@ -72,6 +72,8 @@ enum class ErrorCode : std::uint16_t {
     ProbeFailed       = 601, ///< shell/env probe failed and no fallback was given
     Interpolation     = 602, ///< ${...} names a symbol that does not exist
     UndefinedValue    = 603, ///< expression read a symbol that has no value
+    ArithmeticOverflow = 604,
+    InvalidShift       = 605,
 
     UnknownBackend  = 700,
     TemplateMissing = 701,
@@ -254,6 +256,8 @@ using Result = std::expected<T, Diagnostic>;
         case ErrorCode::ProbeFailed:         return "probe-failed";
         case ErrorCode::Interpolation:       return "interpolation";
         case ErrorCode::UndefinedValue:      return "undefined-value";
+        case ErrorCode::ArithmeticOverflow:  return "arithmetic-overflow";
+        case ErrorCode::InvalidShift:        return "invalid-shift";
         case ErrorCode::UnknownBackend:      return "unknown-backend";
         case ErrorCode::TemplateMissing:     return "template-missing";
         case ErrorCode::WriteFailed:         return "write-failed";

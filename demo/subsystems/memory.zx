@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace mm
+menu "Memory management" {
+    option MemorySubsystem : bool = true { enabled BenchMemoryMiB >= 256 }
+    menu "Memory banks" visible MemorySubsystem {
+        utils.STRESS_BANK(MmA, "Memory / bank A")
+        utils.STRESS_BANK(MmB, "Memory / bank B")
+    }
+}

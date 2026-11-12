@@ -1,0 +1,6 @@
+zxconfig 1.1
+namespace ppc64le
+menu "PowerPC CPU features" {
+    option PpcRadixMmu : bool = true
+    utils.STRESS_CLUSTER(PpcCpu)
+}

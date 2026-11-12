@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace fs
+menu "Filesystems" {
+    option FsSubsystem : bool = true { enabled storage.StorageSubsystem }
+    menu "Filesystem banks" visible FsSubsystem {
+        utils.STRESS_BANK(FsA, "Filesystems / bank A")
+        utils.STRESS_BANK(FsB, "Filesystems / bank B")
+    }
+}

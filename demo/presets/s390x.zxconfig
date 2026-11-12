@@ -1,0 +1,4 @@
+zxcache 1
+set arch.BenchTarget enum "s390x"
+set arch.BenchBootProtocol enum "direct"
+set arch.BenchCpuCount int "24"

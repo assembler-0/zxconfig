@@ -18,7 +18,9 @@ constexpr Keyword k_keywords[] = {
     {"deprecated", TokenKind::KwDeprecated},
     {"enabled",    TokenKind::KwEnabled},
     {"enum",       TokenKind::KwEnum},
+    {"error",      TokenKind::KwError},
     {"export",     TokenKind::KwExport},
+    {"export_with_prefix", TokenKind::KwExportWithPrefix},
     {"fallback",   TokenKind::KwFallback},
     {"from",       TokenKind::KwFrom},
     {"generate",   TokenKind::KwGenerate},
@@ -44,6 +46,7 @@ constexpr Keyword k_keywords[] = {
     {"order",      TokenKind::KwOrder},
     {"path",       TokenKind::KwPath},
     {"pattern",    TokenKind::KwPattern},
+    {"presets_dir", TokenKind::KwPresetsDir},
     {"range",      TokenKind::KwRange},
     {"resolve",    TokenKind::KwResolve},
     {"set",        TokenKind::KwSet},
@@ -119,8 +122,9 @@ const char* to_string(TokenKind kind) noexcept {
         case TokenKind::KwZxconfig: case TokenKind::KwOption: case TokenKind::KwComputed:
         case TokenKind::KwMenu: case TokenKind::KwChoice: case TokenKind::KwDeprecated:
         case TokenKind::KwAlias: case TokenKind::KwInclude: case TokenKind::KwGenerate:
-        case TokenKind::KwMacro: case TokenKind::KwExport: case TokenKind::KwValidate:
-        case TokenKind::KwWarn: case TokenKind::KwConflict: case TokenKind::KwBool:
+         case TokenKind::KwMacro: case TokenKind::KwExport: case TokenKind::KwValidate:
+         case TokenKind::KwExportWithPrefix: case TokenKind::KwPresetsDir:
+         case TokenKind::KwWarn: case TokenKind::KwError: case TokenKind::KwConflict: case TokenKind::KwBool:
         case TokenKind::KwTristate: case TokenKind::KwInt: case TokenKind::KwUint:
         case TokenKind::KwHex: case TokenKind::KwString: case TokenKind::KwPath:
         case TokenKind::KwEnum: case TokenKind::KwSet: case TokenKind::KwList:

@@ -1,0 +1,8 @@
+zxconfig 1.1
+namespace riscv64
+menu "RISC-V CPU features" {
+    option RiscvExtensions : set = {integer, multiply} {
+        choices integer | multiply | atomic | compressed | vector
+    }
+    utils.STRESS_CLUSTER(RiscvCpu)
+}

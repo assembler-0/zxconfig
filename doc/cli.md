@@ -13,7 +13,7 @@ interface does is reachable from here, so CI never needs a terminal.
 | --- | --- |
 | `-f, --file <path>` | root manifest (default `./ZXConfig`) |
 | `--root <path>` | directory includes may not escape (default: the manifest's directory) |
-| `--preset <path>` | apply a preset; repeatable |
+| `--preset <path>` | apply a preset through `presets_dir` search paths; repeatable |
 | `--set <N>=<V>` | set a symbol; repeatable |
 | `--unset <name>` | return a symbol to its default; repeatable |
 | `--save [path]` | write the cache after applying inputs (default: the cache; else `path`) |
@@ -45,9 +45,11 @@ value fails loudly with exit 1 rather than continuing.
 
 ## Validation gates writing
 
-`validate` errors are hard errors: `--generate` and `--save` refuse while one
+`error` clauses are the hard errors: `--generate` and `--save` refuse while one
 stands, per the language specification.  Fix it or pass `--force` when
-regeneration is the point.  `warn` clauses never block.
+regeneration is the point.  `warn` clauses never block.  A refused `--set`
+(that would leave a hidden selection or violate a constraint) fails atomically
+and leaves no partial preset behind.
 
 ## Examples
 

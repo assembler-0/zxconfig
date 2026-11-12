@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace tracing
+menu "Tracing and profiling" {
+    option TracingSubsystem : bool = true { enabled BenchRun }
+    menu "Tracing banks" visible TracingSubsystem {
+        utils.STRESS_BANK(TraceA, "Tracing / bank A")
+        utils.STRESS_BANK(TraceB, "Tracing / bank B")
+    }
+}

@@ -1,0 +1,4 @@
+zxcache 1
+# Deliberately fails cross-symbol validation and must block saves/generation.
+set BenchMemoryMiB int "256"
+set BenchWorkers int "64"

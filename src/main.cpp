@@ -231,6 +231,9 @@ public:
 
     [[nodiscard]] std::string state_name() const override { return state_; }
 
+    /// @brief The single dirty/saved record
+    [[nodiscard]] bool dirty() const override { return revision_ != saved_revision_; }
+
     [[nodiscard]] std::size_t error_count() const override {
         std::scoped_lock lock{findings_mutex_};
         return errors_;
@@ -265,11 +268,13 @@ public:
             if (entry.kind == Entry::Kind::Menu) {
                 listed[i] = (i == 0 || is_expanded) ? 1 : 0;
                 if (i == 0) continue;
+                if (!runtime_.is_menu_active(*entry.menu)) continue;
                 if (!runtime_.is_menu_visible(*entry.menu)) continue;
                 out.push_back(menu_row(entry, i, is_expanded));
             } else {
                 listed[i] = 0;
                 const auto& symbol = *entry.symbol;
+                if (!runtime_.is_symbol_active(symbol)) continue;
                 if (!runtime_.is_visible(symbol.name)) continue;
                 out.push_back(symbol_row(symbol, i));
             }
@@ -332,9 +337,13 @@ public:
             out.range = std::to_string(symbol.meta.range->lo) + " .. "
                       + std::to_string(symbol.meta.range->hi);
         }
-        for (std::size_t i = 0; i < symbol.meta.choices.size(); ++i) {
-            if (i != 0) out.choices += ",";
-            out.choices += symbol.meta.choices[i];
+        bool first_choice = true;
+        for (const auto& choice : symbol.meta.choices) {
+            const auto visible = runtime_.choice_visible(symbol.name, choice);
+            if (!visible || !*visible) continue;
+            if (!first_choice) out.choices += ",";
+            out.choices += choice;
+            first_choice = false;
         }
         const auto where = arena_.resolve(symbol.span.begin);
         if (where.is_valid()) {
@@ -373,10 +382,10 @@ public:
         }
         out.flags = flags;
 
-        std::string prefix;
+        std::string prefix = document_.export_prefix;
         for (const auto& directive : document_.generates) {
             if (directive.backend == zxconfig::GenerateDirective::Backend::Header
-                && !directive.prefix.empty()) {
+                && (directive.prefix_override || !directive.prefix.empty())) {
                 prefix = directive.prefix;
                 break;
             }
@@ -503,13 +512,12 @@ public:
         }
         if (!blocked.empty()) return "conflict must be resolved: " + blocked;
 
-        auto lock = zxconfig::CacheLock::acquire(cache_path_, 1);
-        if (!lock) return lock.error().message;
-
         auto document = runtime_.to_cache(manifest_, digest_);
-        auto stored = zxconfig::store_cache(cache_path_, document);
+        // The lock guards concurrent writers; the store is atomic + fsync.
+        auto stored = zxconfig::store_cache_locked(cache_path_, document, 1);
         if (!stored) return stored.error().message;
 
+        saved_revision_ = revision_;
         set_state("saved");
         zxconfig::log::info("saved {} assignment(s) to {}",
                             document.assignments.size(), cache_path_.string());
@@ -588,22 +596,11 @@ public:
     }
 
     [[nodiscard]] std::vector<std::string> preset_items() const override {
-        std::vector<std::string> out;
-        const auto dir = std::filesystem::path{manifest_}.parent_path() / "presets";
-        std::error_code ec;
-        for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-            if (!entry.is_regular_file(ec)) continue;
-            // Lock files from --save live beside their preset; they are not
-            // presets and must never be offered as one.
-            if (entry.path().extension() == ".lock") continue;
-            out.push_back(entry.path().filename().string());
-        }
-        std::sort(out.begin(), out.end());
-        return out;
+        return zxconfig::discover_presets(manifest_, document_.preset_dirs);
     }
 
     [[nodiscard]] std::string load_preset(std::string path) override {
-        const auto target = zxconfig::resolve_preset(path, manifest_);
+        const auto target = zxconfig::resolve_preset(path, manifest_, document_.preset_dirs);
         auto preset = zxconfig::load_cache(target);
         if (!preset) return preset.error().message;
 
@@ -615,24 +612,13 @@ public:
             zxconfig::log::warn("{}", report);
         }
 
-        std::size_t applied = 0;
-        std::size_t refused = 0;
-        for (const auto& assignment : preset->assignments) {
-            if (runtime_.apply_assignment(assignment.symbol, assignment.value,
-                                          assignment.type)) {
-                ++applied;
-            } else {
-                ++refused;
-                zxconfig::log::warn("preset assignment refused for '{}': {}",
-                                    assignment.symbol, "value not accepted");
-            }
-        }
-        if (applied == 0 && refused > 0) return "no assignment could be applied";
+        auto applied = runtime_.apply_assignments(preset->assignments);
+        if (!applied) return applied.error().message;
 
         // A preset is not the on-disk cache: the state is now unsaved.
         after_change();
-        zxconfig::log::info("preset {}: {} applied, {} refused",
-                            target.string(), applied, refused);
+        zxconfig::log::info("preset {}: {} assignments applied atomically",
+                            target.string(), preset->assignments.size());
         return {};
     }
 
@@ -743,6 +729,7 @@ private:
     }
 
     void after_change() {
+        ++revision_;
         revalidate();
         refresh_implications();
         set_state("MODIFIED");
@@ -801,6 +788,11 @@ private:
 
     std::vector<Entry> entries_;
     std::string state_{"init"};
+
+    /// @brief Change and save revisions: every accepted change bumps
+    ///        @p revision_, a successful save records it as saved.  See dirty().
+    std::size_t revision_{0};
+    std::size_t saved_revision_{0};
 
     mutable std::mutex findings_mutex_;
     std::vector<zxconfig::Diagnostic> findings_;
@@ -1034,25 +1026,20 @@ int main(int argc, char** argv) {
     for (const auto& input : inv->inputs) {
         switch (input.kind) {
             case Invocation::Input::Kind::Preset: {
-                const auto target = zxconfig::resolve_preset(input.name, manifest_name);
+                const auto target = zxconfig::resolve_preset(input.name, manifest_name, parsed.document.preset_dirs);
                 auto preset = zxconfig::load_cache(target);
                 if (!preset) {
-                    zxconfig::log::warn("preset {}: {}", target.string(),
-                                        preset.error().message);
-                    continue;
+                    zxconfig::log::error("preset {}: {}", target.string(),
+                                         preset.error().message);
+                    return 1;
                 }
                 for (const auto& report : zxconfig::rename_assignments(*preset, renames)) {
                     zxconfig::log::warn("{}", report);
                 }
-                for (const auto& assignment : preset->assignments) {
-                    if (auto applied = runtime.apply_assignment(
-                            assignment.symbol, assignment.value, assignment.type)) {
-                        zxconfig::log::info("preset: {} = {}", assignment.symbol,
-                                            assignment.value);
-                    } else {
-                        zxconfig::log::warn("preset {}: {}", input.name,
-                                            applied.error().message);
-                    }
+                auto applied = runtime.apply_assignments(preset->assignments);
+                if (!applied) {
+                    zxconfig::log::error("preset {}: {}", input.name, applied.error().message);
+                    return 1;
                 }
                 break;
             }
@@ -1104,12 +1091,8 @@ int main(int argc, char** argv) {
         auto document = runtime.to_cache(manifest_name, digest);
         const auto target = inv->save_path.empty()
             ? cache_path : std::filesystem::path{inv->save_path};
-        auto lock = zxconfig::CacheLock::acquire(target, 2);
-        if (!lock) {
-            zxconfig::log::error("{}", lock.error().message);
-            return 1;
-        }
-        if (auto stored = zxconfig::store_cache(target, document)) {
+        // The same persistence core the interface's save action uses.
+        if (auto stored = zxconfig::store_cache_locked(target, document, 2)) {
             zxconfig::log::info("saved {} assignment(s) to {}",
                                 document.assignments.size(), target.string());
         } else {

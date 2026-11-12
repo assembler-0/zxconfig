@@ -102,15 +102,22 @@ struct Reconciliation {
 
 /// @brief Resolve a preset reference to a path.
 ///
-/// A bare name that exists under the manifest's `presets/` directory wins;
-/// otherwise the name resolves against the manifest's directory.  Absolute
-/// paths are used as given.  What the dialog lists is what a bare name loads.
+/// Search configured directories in declaration order, then the manifest's
+/// directory. Relative search directories resolve against the root manifest.
+/// An empty search list defaults to presets/. Absolute names are used as given.
 ///
 /// @param[in] name      Preset reference as written on the command line or
 ///                      typed in the dialog.
 /// @param[in] manifest  Path of the root manifest.
+/// @param[in] directories Ordered search directories from presets_dir directives.
 [[nodiscard]] std::filesystem::path resolve_preset(std::string_view name,
-                                                   const std::filesystem::path& manifest);
+                                                   const std::filesystem::path& manifest,
+                                                   std::span<const std::string> directories = {});
+
+/// @brief Discover presets across the same paths used by resolve_preset().
+/// Returns exact absolute paths, sorted within each directory and deduplicated.
+[[nodiscard]] std::vector<std::string> discover_presets(
+    const std::filesystem::path& manifest, std::span<const std::string> directories = {});
 
 /// @brief A deprecated-name rewrite: the old spelling, its replacement, and
 ///        the message the spec attaches to the rename.
@@ -151,6 +158,21 @@ struct Rename {
 ///                            Invariant, because only this engine writes caches.
 [[nodiscard]] Result<void> store_cache(const std::filesystem::path& path,
                                        const CacheDocument& document);
+
+/// @brief Take @p path's lock and write the cache atomically.
+///
+/// The one persistence core for every writer: the CLI's `--save` and the
+/// interface's save action both persist through it, so lock discipline and
+/// durability cannot drift between them.
+/// @param[in] path          Destination.
+/// @param[in] document      Document to write.  Its format must be k_cache_format.
+/// @param[in] lock_timeout  Seconds to wait for the lock.  Zero tries once.
+/// @retval LockBusy         when another invocation holds it past @p lock_timeout
+/// @retval WriteFailed      when the file cannot be created or renamed
+/// @retval PermissionDenied when the operating system refuses
+[[nodiscard]] Result<void> store_cache_locked(const std::filesystem::path& path,
+                                              const CacheDocument& document,
+                                              std::uint32_t lock_timeout);
 
 /// @brief Render a document to its textual form.
 [[nodiscard]] std::string format_cache(const CacheDocument& document);

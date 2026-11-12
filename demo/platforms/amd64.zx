@@ -1,0 +1,6 @@
+zxconfig 1.1
+namespace amd64
+menu "AMD64 CPU features" {
+    option Amd64Apic : bool = true
+    utils.STRESS_CLUSTER(Amd64Cpu)
+}

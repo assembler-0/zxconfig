@@ -145,7 +145,7 @@ TEST(Lexer, reports_an_unexpected_character_and_continues) {
 
 TEST(Lexer, lexes_a_declaration) {
     auto result = scan(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option NR_CPUS : int = 4 {\n"
         "    range 1 .. 512\n"
         "    when SMP\n"

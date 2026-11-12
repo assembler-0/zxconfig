@@ -91,6 +91,11 @@ public:
     [[nodiscard]] virtual std::string title() const = 0;
     /// @brief Current run state, e.g. READY, MODIFIED, SAVED.
     [[nodiscard]] virtual std::string state_name() const = 0;
+    /// @brief Whether a change stands unsaved: true after any mutation, and
+    ///        after a preset or refused-cache application, false after a
+    ///        successful save and while nothing changed.  The quit prompt
+    ///        consults this instead of counting modified symbols.
+    [[nodiscard]] virtual bool dirty() const = 0;
     /// @brief Validation error count.
     [[nodiscard]] virtual std::size_t error_count() const = 0;
     /// @brief Validation warning count.
@@ -146,8 +151,8 @@ public:
     ///        replaced) is ignored.  An empty string is success.
     [[nodiscard]] virtual std::string respond_prompt(std::size_t id, std::size_t option) = 0;
 
-    /// @brief Preset files found in the manifest's `presets/` directory,
-    ///        sorted.  The suggestion list for the load-preset dialog.
+    /// @brief Presets found through configured search directories, as exact
+    ///        absolute paths. Sorted per directory in search order.
     [[nodiscard]] virtual std::vector<std::string> preset_items() const = 0;
 
     /// @brief Apply the preset at @p path over the current values.  Preset

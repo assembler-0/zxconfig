@@ -1,14 +1,36 @@
-zxconfig 1.0
+zxconfig 1.1
 namespace arch
 
-# Namespaced include: everything here lands under `arch.` in the symbol
-# index and the generated files.
+menu "Architecture: ${BenchTarget}" {
+    option BenchTarget : enum = amd64 {
+        label "Target architecture"
+        choices amd64 | arm64 | riscv64 | s390x | ppc64le
+        help "Changing target hides one included architecture subtree and reveals another."
+        tags ["target", "architecture", "control"]
+    }
+    option BenchSmp : bool = true
+    option BenchCpuCount : int = 16 { range 1 .. 1024; enabled BenchSmp }
+    option BenchPageSize : uint = 4096 { range 4096 .. 65536 }
+    option BenchBaseAddress : hex = 0x100000
+    option BenchBootProtocol : enum = efi { choices efi | legacy | direct }
+    option BenchKaslr : bool = true
+    computed BenchPageMask : hex = (BenchPageSize - 1) ^ 0xFFFFFFFF
+    computed BenchTargetDescription : string = "${BenchTarget}/${BenchCpuCount} CPUs"
+    computed BenchHasVirtualization : bool = BenchTarget == amd64 or BenchTarget == arm64
 
-option BOOT_PROTOCOL : enum = efi {
-    label   "Boot protocol"
-    choices efi | legacy
-}
-
-option KASLR : bool = true {
-    label "Kernel address space layout randomization"
+    menu "AMD64 platform" visible BenchTarget == amd64 {
+        include "platforms/amd64.zx" visible BenchTarget == amd64
+    }
+    menu "AArch64 platform" visible BenchTarget == arm64 {
+        include "platforms/arm64.zx" visible BenchTarget == arm64
+    }
+    menu "RISC-V platform" visible BenchTarget == riscv64 {
+        include "platforms/riscv64.zx" visible BenchTarget == riscv64
+    }
+    menu "S390X platform" visible BenchTarget == s390x {
+        include "platforms/s390x.zx" visible BenchTarget == s390x
+    }
+    menu "PowerPC platform" visible BenchTarget == ppc64le {
+        include "platforms/ppc64le.zx" visible BenchTarget == ppc64le
+    }
 }

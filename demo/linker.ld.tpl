@@ -1,7 +1,11 @@
-/* generated demo linker script */
+/* ${BenchProject}: ${arch.BenchTarget}, host ${BenchHostOs}/${BenchHostArch} */
 ENTRY(_start)
 SECTIONS {
-    . = ${BASE_ADDR};
+    . = ${arch.BenchBaseAddress};
     .text : { *(.text*) }
+    .rodata : { *(.rodata*) }
+    .data : { *(.data*) }
+    .bss : { *(.bss*) *(COMMON) }
 }
-/* $$ is a literal dollar: $$BASE_ADDR is not interpolated */
+/* dependency chain terminal: ${dep.Chain0256} */
+/* $$ escapes a literal dollar: $$BenchProject */

@@ -1,0 +1,6 @@
+zxconfig 1.1
+namespace arm64
+menu "ARM64 CPU features" {
+    option Arm64Gic : enum = v3 { choices v2 | v3 | v4 }
+    utils.STRESS_CLUSTER(Arm64Cpu)
+}

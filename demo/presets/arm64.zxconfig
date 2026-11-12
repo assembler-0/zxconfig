@@ -1,0 +1,5 @@
+zxcache 1
+set arch.BenchTarget enum "arm64"
+set arch.BenchBootProtocol enum "direct"
+set arch.BenchCpuCount int "32"
+set BenchMemoryMiB int "16384"

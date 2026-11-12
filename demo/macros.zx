@@ -1,0 +1,88 @@
+zxconfig 1.1
+namespace utils
+
+# 20 symbols and three nested menus per device. Every declaration has a
+# unique flat export name derived from its bank/cluster/device prefix.
+export macro STRESS_DEVICE(id, previous) {
+    menu "${id} / ${BenchProject} / ${arch.BenchTarget}" {
+        option ${id}Enabled : bool = true {
+            label "${id}: enable device"
+            help "Exercises visibility, mutability, runtime interpolation, and cache reload."
+            enabled BenchRun and ${previous}
+            tags ["device", "${id}", "stress"]
+        }
+        option ${id}Link : tristate = m {
+            label "${id}: link mode"
+            when ${id}Enabled
+            implies ${id}Enabled
+        }
+        menu "Queues and policy" {
+            option ${id}Queues : int {
+                range 1 .. 1024
+                enabled ${id}Enabled and arch.BenchSmp
+                default { min(arch.BenchCpuCount, 64) when BenchFastPath 1 }
+            }
+            option ${id}Budget : uint = 64 { range 1 .. 65536 }
+            option ${id}Mask : hex = 0xFF
+            option ${id}Policy : enum = balanced {
+                choices economy | balanced | throughput | latency
+                label "${id}: scheduling policy"
+                choice economy { label "Economy" }
+                choice balanced { label "Balanced" }
+                choice throughput { label "Throughput" }
+                choice latency { label "Low latency"; visible BenchExpert }
+            }
+            option ${id}Checks : set = {bounds} {
+                choices bounds | trace | verify | audit
+                warn ${id}Checks == {} : "${id}: no checks enabled"
+            }
+            option ${id}Name : string = "${BenchProject}/${id}/${arch.BenchTarget}" {
+                pattern "^[A-Za-z0-9_/-]+$"
+            }
+            option ${id}Flags : list<string> = ["-O2", "-Wall"]
+            option ${id}Path : path = "." { path must_exist | is_dir }
+        }
+        menu "Expert controls" visible BenchExpert and ${id}Enabled {
+            option ${id}Expert : bool = false { order -10 }
+            option ${id}Force : bool = false {
+                implies ${id}Enabled
+                conflict ${id}Enabled { resolve "${id}: enable the dependency?" }
+            }
+            option ${id}Timeout : int = 100 { range 1 .. 60000 }
+            option ${id}Trace : bool = false {
+                visible contains(${id}Checks, trace)
+                enabled ${id}Policy != economy
+            }
+        }
+        computed ${id}Ready : bool = ${id}Enabled and ${id}Link != n and BenchRun
+        computed ${id}Depth : int = ${id}Queues * ${id}Budget
+        computed ${id}Route : string = "/${arch.BenchTarget}/${id}"
+        computed ${id}Fingerprint : hex = (${id}Budget << 8) | ${id}Mask
+        computed ${id}Balanced : bool = ${id}Policy == balanced and ${id}Checks == {bounds}
+        option ${id}Tune : int = 4 { range 0 .. 100; enabled ${id}Ready }
+    }
+}
+
+# Eight devices per cluster. The enable chain crosses sibling declarations.
+export macro STRESS_CLUSTER(id) {
+    menu "Cluster ${id}" {
+        STRESS_DEVICE(${id}D0, BenchRun)
+        STRESS_DEVICE(${id}D1, ${id}D0Enabled)
+        STRESS_DEVICE(${id}D2, ${id}D1Enabled)
+        STRESS_DEVICE(${id}D3, ${id}D2Enabled)
+        STRESS_DEVICE(${id}D4, ${id}D3Enabled)
+        STRESS_DEVICE(${id}D5, ${id}D4Enabled)
+        STRESS_DEVICE(${id}D6, ${id}D5Enabled)
+        STRESS_DEVICE(${id}D7, ${id}D6Enabled)
+    }
+}
+
+# 4 clusters x 8 devices x 20 symbols = 640 symbols per bank.
+export macro STRESS_BANK(id, title) {
+    menu "${title}" {
+        STRESS_CLUSTER(${id}_A)
+        STRESS_CLUSTER(${id}_B)
+        STRESS_CLUSTER(${id}_C)
+        STRESS_CLUSTER(${id}_D)
+    }
+}

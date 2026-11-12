@@ -4,8 +4,12 @@
 
 Every zxconfig file should open with a version header so tooling can handle format evolution gracefully.
 ```c
-zxconfig 1.0
+zxconfig 1.1
 ```
+
+Note: The current format is `1.1`. Files declaring `1.0` still parse and receive a
+migration diagnostic; version numbers without a minor (`zxconfig 1`) are
+rejected as a syntax error. This loader treats no other version as prose.
 
 ---
 
@@ -164,6 +168,13 @@ deprecated SLAB_DEBUG -> SLUB_DEBUG {
 alias NET_DRIVER_VIRTIO = VIRTIO_NET
 ```
 
+Alias and deprecation targets resolve like ordinary expressions: the
+declaring file's namespace first, then global symbols. The canonical name is
+what tooling uses, so a namespaced file can alias a global symbol and the
+alias is reachable under its own qualified name. Unknown targets are parse
+errors. The deprecated *old* name is a legacy cache spelling: it is kept
+exactly as written and never validated against declared symbols.
+
 ---
 
 ## Choice group
@@ -183,6 +194,27 @@ option DEBUG_FEATURES : set = {} {
     label   "Debug feature flags"
     choices lockdep | kasan | ubsan | kcsan
 }
+```
+
+### Hidden choices are invalid values
+
+A `choice` block may carry a `visible` condition, exactly like a symbol. A
+member whose condition is false is *hidden*: the interface does not offer it,
+and — more importantly — a value that currently selects it is invalid. When a
+dependency collapses and hides the selected member, the whole configuration
+fails to evaluate with a diagnostic naming the symbol and member; a dependent
+write (aiming to hide it) is refused, and the user must either restore the
+dependency or change the selection first. This mirrors dependency rules in
+Kconfig-style systems but fails loudly instead of silently coercing.
+
+```c
+option EXPERT : bool = false
+option PREEMPT_MODEL : enum = voluntary {
+    choices none | voluntary | full | realtime
+    choice realtime { visible EXPERT }
+}
+# With EXPERT = false and PREEMPT_MODEL forced to realtime, evaluation fails:
+# 'realtime' is hidden for 'PREEMPT_MODEL'
 ```
 
 ---
@@ -223,13 +255,51 @@ computed LIB_DIR : string = "${PREFIX}/lib/${ARCH}"
 
 ## Includes and namespacing
 
+Project policy is declared at the root manifest's top level:
+
+```c
+zxconfig 1.1
+export_with_prefix "CONFIG_"
+presets_dir "profiles"
+presets_dir "vendor/profiles"
+presets_dir ""
+```
+
+`export_with_prefix` is optional and may occur once. The default is `""`.
+It prepends a literal prefix to flat exported names in headers, Makefiles,
+CMake, and JSON: `arch.ArTargetCpu` exports as `CONFIG_ArTargetCpu`.
+Declaration spelling and case are preserved, as are generated suffixes
+such as `_s390x` and `_MODULE`. Internal names, cache assignments, and
+template `${arch.ArTargetCpu}` references are unaffected. Prefixes must be
+empty or match `[A-Za-z_][A-Za-z0-9_]*`.
+
+`presets_dir` is repeatable. Entries are searched in declaration order and
+replace the default `presets/` directory when any are provided. Relative
+paths resolve against the root manifest's directory; absolute paths are
+accepted, and `""` means that directory itself. For each search directory,
+lookup tries the supplied name and then the name with `.zxconfig` appended.
+The manifest directory remains a final fallback. Absolute preset filenames
+are used directly. These are literal paths, without `${...}` interpolation.
+
+The TUI lists `.zxconfig` files from configured directories, sorted within
+each directory in search order. It loads the exact selected file, so two
+directories may both contain `ci.zxconfig` without selecting the wrong one.
+Missing directories are ignored; lock files and directories are not listed.
+Other preset extensions remain loadable through an explicit name or path.
+
+Both directives are project-wide regardless of where they appear in the
+root's declaration order. Included files, menus, and macro expansions
+cannot change project policy. A per-header `prefix "CUSTOM_"` remains an
+explicit override, including `prefix ""` to suppress the project prefix for
+that header only. This is replacement, not prefix concatenation.
+
 The defining file owns its namespace. Put one optional `namespace` declaration
 immediately after its version header. Without it, the file declares global
 symbols. Namespaces are case-sensitive and may contain dotted segments.
 
 ```c
 # arch/arch.zx
-zxconfig 1.0
+zxconfig 1.1
 namespace arch
 option ArTargetCpu : enum = s390x { choices s390x | arm64 }
 computed ArIsS390 : bool = ArTargetCpu == s390x
@@ -243,22 +313,29 @@ reports a migration error.
 
 ```c
 # ZXConfig
-zxconfig 1.0
+zxconfig 1.1
 include "arch/arch.zx"
 include "s390x/s390x.zx" visible arch.ArTargetCpu == s390x
 ```
 
 Every included file must exist and have a version header, even if its
-visibility condition is false. Files are parsed once; `visible` controls
-presentation and inherits through included menus and options. Editing the
-architecture re-evaluates visibility and redraws the TUI without re-parsing.
-Hidden options retain their values. A bare `visible arch.ArTargetCpu` checks
-whether the value is nonempty; use `== s390x` to choose one architecture.
+condition is false. Files are parsed once; the condition decides whether
+the include is *active*, re-evaluated whenever a referenced value changes.
+An inactive include is structurally present but semantically absent: its
+symbols cannot be read or written, are not evaluated, are not exported by
+any backend, are not listed in the TUI, and their `warn`/`error` clauses do
+not fire. Values recorded while it was active are dropped when it
+deactivates. When one file is reached on several include edges it is active
+if any edge's condition holds; the root manifest is always active.
+Editing the architecture re-evaluates visibility and redraws the TUI
+without re-parsing. A bare `visible arch.ArTargetCpu` checks whether the
+value is nonempty; use `== s390x` to choose one architecture.
 
 Internal identities and cache assignments use `arch.ArTargetCpu`. Generated
 headers, Makefiles, CMake files, and JSON use the flat declaration spelling
 `ArTargetCpu`, preserving case and adding no implicit `CONFIG_` prefix.
-Header generation still accepts an explicit `prefix "CONFIG_"` option.
+Use `export_with_prefix` for a common prefix across backends, or a header's
+explicit `prefix "CONFIG_"` option for a header-only override.
 Enum/set member flags use `ArTargetCpu_s390x`; tristate module flags use
 `Name_MODULE`. Collisions between exported names, including generated flags,
 are errors in every structured output backend.
@@ -326,31 +403,67 @@ computed LIB_DIR : string = "${PREFIX}/lib/${ARCH}"
 
 ## Cross-symbol validation
 
-`validate` blocks are hard errors — the configuration cannot be saved. The new `warn` form is advisory only; it produces a visible warning but does not block the save.
+All validation clauses share one shape. `warn CONDITION : "message"` and
+`error CONDITION : "message"` fire when their condition is TRUE — there is no
+assertion style. `warn` is advisory: it is visible in reports and the status
+row but never blocks. `error` is a hard failure: `--save` and `--generate`
+refuse while an error fires (the CLI offers `--force` to proceed anyway).
+
+Clauses live at the top level (evaluated once, against the whole
+configuration) or inside a symbol block (evaluated in that symbol's scope,
+after the symbol's value is resolved). Conditions that fail to evaluate — a
+misspelled identifier, a failed probe — are themselves reported as errors; a
+broken condition never silently reads as false.
+
 ```c
 option RAM_SIZE : int = 1024
 option THREADS  : int = 8
 
-# Hard error
-validate "Insufficient memory per thread" {
-    RAM_SIZE >= THREADS * 128
-}
+# Hard errors — block --save / --generate while they hold
+error RAM_SIZE < THREADS * 128 : "Insufficient memory per thread"
+error (RAM_SIZE & (RAM_SIZE - 1)) != 0 : "RAM must be a power of two"
 
-validate "RAM must be power of two" {
-    (RAM_SIZE & (RAM_SIZE - 1)) == 0
-}
-
-# Soft warning — user is informed but not blocked
-warn "Low memory may degrade performance" {
-    RAM_SIZE >= 256
-}
+# Advisory — user is informed but not blocked
+warn RAM_SIZE >= 256 : "Low memory may degrade performance"
 ```
 
 ---
 
 ## Meta-programming (macros)
 
-Macros are scoped to the file by default. Use `export macro` to make them available to files that `include` this one.
+Macros are private to the defining file by default. `export macro` makes a
+macro available to importers, transitively through intermediate includes,
+and to child files subsequently included by those importers. Import order
+matters: import the shared macros before including their consumers.
+
+A file declaring `namespace utils` defines `utils.Foo(...)`. Use `Foo(...)`
+within that namespace and `utils.Foo(...)` elsewhere. Qualified macro names
+are also valid as macro arguments. Helper and recursive calls resolve in
+the definition environment; generated symbols use the caller's namespace.
+Private helper macros can be called by their exported wrapper without being
+callable directly from the importer. Repeated imports reuse exported
+definitions; conflicting definitions of the same qualified macro are errors.
+Expansion is recursive and bounded to 32 levels; unbounded recursion reports
+a diagnostic. No compile-time conditional or arithmetic macro dispatch is
+provided; finite recursion can use continuation macro parameters.
+
+```c
+# utils.zx
+zxconfig 1.1
+namespace utils
+export macro Foo(id) { option ${id} : bool = true }
+
+# ZXConfig
+zxconfig 1.1
+include "utils.zx"
+include "network.zx"
+
+# network.zx: inherits utils.Foo from the importer
+zxconfig 1.1
+namespace net
+utils.Foo(NetEnabled)  # declares net.NetEnabled, exports NetEnabled
+```
+
 ```c
 # File-local macro (default)
 macro DRIVER(id, label_name) {
@@ -394,14 +507,19 @@ generate template "config.ld" from "scripts/linker.ld.tpl" {
 ## Advanced expressions
 
 All expression fields share one grammar: defaults, `visible`, `when`,
-`enabled`, `implies`, inline `warn`, and top-level `warn`/`validate`.
-Scalar equality supports numbers, strings, and enums. `{a, b}` denotes a set;
-set equality ignores order and duplicate members. `["a", "b"]` denotes a
-list; list equality preserves order. Comparing a set with a list is a type
-error. Collection ordering (`<`, `>`, etc.)
-is unsupported. `contains(Flags, kasan)` tests membership and
-`type_of(Flags) == "set"` tests the declared type. Quote arbitrary string
-literals; bare enum/set choice names must be declared in `choices`.
+`enabled`, `implies`, `warn`/`error` conditions, computed definitions, and
+macro fragments. Scalar equality supports numbers, strings, and enums.
+`{a, b}` denotes a set; set equality ignores order and duplicate members.
+`["a", "b"]` denotes a list; list equality preserves order. Comparing a set
+with a list is a type error, and collections cannot be ordered with `<`, `>`,
+etc. `contains(Features, kasan)` tests membership and
+`type_of(Features) == "set"` tests the declared type. Quote arbitrary string
+literals; a bare enum/set choice name is only a typed literal where the
+surrounding context determines the type — as a default inside that
+enum/set's own block, as the other side of a comparison against a direct
+enum/set reference, or as the tested member of `contains()` next to a set
+reference. An unrelated symbol that happens to mention the same name never
+validates a bare name.
 
 ```c
 option Features : set = {kasan} { choices kasan | ubsan }
@@ -410,14 +528,15 @@ option DebugInfo : bool = true {
     enabled contains(Features, kasan)
     warn Features == {} : "No debug features selected"
 }
-validate "Both features are required" { Features == {kasan, ubsan} }
+error Features != {kasan, ubsan} : "Both debug features are required"
 ```
 
-Inline `warn EXPR : "message"` reports when EXPR is true. Top-level
-`warn "message" { EXPR }` and `validate "message" { EXPR }` are assertions
-and report when EXPR is false. Conditions use truthiness: positive numbers,
-nonempty strings/enums, and nonempty collections are true. Logical operators
-short-circuit when the result is determined and retain tristate semantics.
+`warn CONDITION : "message"` and `error CONDITION : "message"` fire when
+CONDITION is true (see Cross-symbol validation). Conditions use truthiness:
+any nonzero number — including negatives — is true, as are nonempty
+strings/enums and nonempty collections. Tristate values keep their n/m/y
+levels (0/1/2) so module-level checks still distinguish "partially on" from
+"fully on". Logical operators short-circuit when the result is determined.
 
 Bitwise operators, arithmetic, and builtin functions. `shell` and `env` are also valid in expression context (not just defaults).
 ```c

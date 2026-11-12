@@ -1,0 +1,22 @@
+zxconfig 1.1
+namespace recursive
+
+# Actual finite self-recursion: shift a list of continuation macro names.
+# After twelve recursive calls, the continuation becomes RECURSIVE_STOP.
+# This is supported by today's DSL without compile-time arithmetic/if.
+macro RECURSIVE_STOP(id, value, a, b, c, d, e, f, g, h, i, j, k, l) {
+    menu "Terminal ${id}" {
+        computed ${id}Value : int = ${value}
+    }
+}
+
+macro RECURSIVE_STEP(id, value, a, b, c, d, e, f, g, h, i, j, k, l) {
+    menu "Recursive stage ${id}" {
+        computed ${id}Value : int = ${value}
+        ${a}(${id}_N, "${value} + 1", ${b}, ${c}, ${d}, ${e}, ${f}, ${g}, ${h}, ${i}, ${j}, ${k}, ${l}, RECURSIVE_STOP)
+    }
+}
+
+menu "Finite recursive macro expansion (12 calls)" {
+    RECURSIVE_STEP(RecRoot, 0, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STEP, RECURSIVE_STOP)
+}

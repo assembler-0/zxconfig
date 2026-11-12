@@ -1,0 +1,5 @@
+zxcache 1
+set BenchExpert bool "true"
+set BenchChecks set "bounds,trace,verify,audit"
+set BenchPreempt enum "full"
+set arch.BenchCpuCount int "64"

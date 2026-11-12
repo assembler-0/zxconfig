@@ -2,6 +2,7 @@
 
 #include <zxconfig/cache.hpp>
 #include <zxconfig/hash.hpp>
+#include <zxconfig/io.hpp>
 #include <zxconfig/text.hpp>
 #include <zxconfig/version.hpp>
 
@@ -101,6 +102,18 @@ bool declared_contains(std::span<const std::string_view> declared, std::string_v
     return std::find(declared.begin(), declared.end(), symbol) != declared.end();
 }
 
+std::vector<std::filesystem::path> preset_search_paths(
+    const std::filesystem::path& manifest, std::span<const std::string> directories) {
+    const auto base = manifest.parent_path().empty() ? std::filesystem::path{"."} : manifest.parent_path();
+    std::vector<std::filesystem::path> paths;
+    if (directories.empty()) paths.push_back(base / "presets");
+    for (const auto& directory : directories) {
+        const std::filesystem::path dir{directory};
+        paths.push_back(dir.is_absolute() ? dir : base / dir);
+    }
+    return paths;
+}
+
 }  // namespace
 
 const Assignment* CacheDocument::find(std::string_view symbol) const noexcept {
@@ -149,23 +162,48 @@ std::filesystem::path default_cache_path(const std::filesystem::path& manifest) 
 }
 
 std::filesystem::path resolve_preset(std::string_view name,
-                                     const std::filesystem::path& manifest) {
+                                      const std::filesystem::path& manifest,
+                                      std::span<const std::string> directories) {
     std::filesystem::path target{std::string{name}};
     if (target.is_absolute()) return target;
     const auto base = manifest.parent_path().empty()
         ? std::filesystem::path{"."} : manifest.parent_path();
 
-    // Candidates in order: presets/ first (what the dialog lists), then the
-    // manifest's own directory; each with the conventional extension
-    // appended, so a bare `ci` finds presets/ci.zxconfig.
-    const std::filesystem::path dirs[] = {base / "presets", base};
+    auto dirs = preset_search_paths(manifest, directories);
+    dirs.push_back(base);
     for (const auto& dir : dirs) {
         for (const std::string_view suffix : {"", ".zxconfig"}) {
             const auto candidate = dir / (target.string() + std::string{suffix});
-            if (std::filesystem::exists(candidate)) return candidate;
+            std::error_code ec;
+            if (std::filesystem::is_regular_file(candidate, ec)) return candidate;
         }
     }
     return base / target;
+}
+
+std::vector<std::string> discover_presets(const std::filesystem::path& manifest,
+                                          std::span<const std::string> directories) {
+    const auto dirs = preset_search_paths(manifest, directories);
+    std::vector<std::string> out;
+    for (const auto& dir : dirs) {
+        std::vector<std::string> items;
+        std::error_code ec;
+        std::filesystem::directory_iterator it{dir, ec}, end;
+        while (!ec && it != end) {
+            const auto& path = it->path();
+            if (it->is_regular_file(ec) && path.extension() == ".zxconfig") {
+                auto absolute = std::filesystem::weakly_canonical(path, ec);
+                if (!ec) items.push_back(absolute.string());
+            }
+            if (ec) break;
+            it.increment(ec);
+        }
+        std::sort(items.begin(), items.end());
+        for (auto& item : items) {
+            if (std::find(out.begin(), out.end(), item) == out.end()) out.push_back(std::move(item));
+        }
+    }
+    return out;
 }
 
 std::string format_cache(const CacheDocument& document) {
@@ -335,32 +373,18 @@ Result<void> store_cache(const std::filesystem::path& path, const CacheDocument&
             "refusing to write cache format " + std::to_string(document.format)));
     }
 
-    const auto temporary = path.string() + ".tmp";
-    {
-        std::ofstream out{temporary, std::ios::binary | std::ios::trunc};
-        if (!out) {
-            return std::unexpected(Diagnostic::error(
-                ErrorCode::WriteFailed,
-                "cannot create '" + temporary + "'"));
-        }
-        const auto rendered = format_cache(document);
-        out.write(rendered.data(), static_cast<std::streamsize>(rendered.size()));
-        if (!out) {
-            std::filesystem::remove(temporary);
-            return std::unexpected(Diagnostic::error(
-                ErrorCode::WriteFailed, "error writing '" + temporary + "'"));
-        }
-    }
+    // Atomic + fsync: a crash leaves either the previous cache or the
+    // complete new one, never a truncated file.  Callers hold the lock file,
+    // which serializes concurrent writers.
+    return write_atomically(path, format_cache(document));
+}
 
-    std::error_code ec;
-    std::filesystem::rename(temporary, path, ec);
-    if (ec) {
-        std::filesystem::remove(temporary);
-        return std::unexpected(Diagnostic::error(
-            ErrorCode::WriteFailed,
-            "cannot replace '" + path.string() + "': " + ec.message()));
-    }
-    return {};
+Result<void> store_cache_locked(const std::filesystem::path& path,
+                                const CacheDocument& document,
+                                const std::uint32_t lock_timeout) {
+    auto lock = CacheLock::acquire(path, lock_timeout);
+    if (!lock) return std::unexpected(lock.error());
+    return store_cache(path, document);
 }
 
 Reconciliation reconcile(CacheState state,

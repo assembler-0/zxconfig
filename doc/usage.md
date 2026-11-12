@@ -7,8 +7,9 @@ cd demo && ../build/zxconfig      # the demo project
 ```
 
 The root manifest is `./ZXConfig` unless `-f` names another.  The demo
-carries 60 symbols across 8 menus: every type, macros, file namespaces,
-probes, validation rules, and five generators.
+carries 16,755 symbols across 2,622 menus: every type, shared macros,
+file namespaces, probes, validation, and five generators. See the
+[stress laboratory](../demo/README.md) for workloads and benchmarks.
 
 ## The pipeline
 
@@ -26,9 +27,14 @@ Every run walks the same steps:
 
 ## Behavior rules worth knowing
 
-- **`validate` errors block writing.**  `--save` and `--generate` refuse while
+- **`error` clauses block writing.**  `--save` and `--generate` refuse while
   one stands (`--force` overrides); the interface's `s` refuses with the
-  report one key away.  `warn` clauses never block.
+  report one key away.  `warn` clauses never block.  Clauses fire when their
+  condition is TRUE; a condition that fails to evaluate is itself an error.
+- **Hiding a selection is refused.**  A value that picks a choice member
+  whose `choice ... visible` condition is false is invalid.  A write that
+  would hide the current selection fails with a diagnostic naming the hidden
+  member; restore the dependency or change the selection first.
 - **`implies` prompts, it never forces.**  Turning a symbol on with an
   unsatisfied `implies` raises a suggestion: the alternatives, or Skip.  On
   the command line the suggestions are logged as warnings.
@@ -81,8 +87,10 @@ to scroll, double-click to edit, click buttons.
 ### State, plainly
 
 The header's `state` word is `ready`, `modified`, or `saved`.  The finding
-strip appears above the log whenever a `validate` or `warn` clause fires;
-counters in the header are lit chips when non-zero.  The details panel
+strip appears above the log whenever an `error` or `warn` clause fires;
+counters in the header are lit chips when non-zero.  The enum and set
+choosers only offer alternatives whose choice conditions are true.  The
+details panel
 always shows the selected symbol's label, help, type, value, default,
 constraints, its name in the generated outputs (`exports`), and where it
 came from (`from`, with the full include chain).
@@ -101,8 +109,8 @@ zxconfig --preset ci --generate
 # interactive, starting from a preset
 zxconfig --preset ci
 
-# fix the demo's rule from a script, then keep the result
-zxconfig --set RAM_SIZE=2048 --save --generate
+# change the stress demo's memory budget, then keep the result
+zxconfig --set BenchMemoryMiB=16384 --save --generate
 
 # what changed between two presets? they are plain text
 diff presets/ci.zxconfig presets/big.zxconfig

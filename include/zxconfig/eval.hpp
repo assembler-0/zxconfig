@@ -102,6 +102,11 @@ public:
                                                 std::string_view value,
                                                 ValueType claimed);
 
+    /// @brief Apply an entire preset atomically, evaluating only its final state.
+    [[nodiscard]] Result<void> apply_assignments(std::span<const Assignment> assignments);
+
+    [[nodiscard]] Result<bool> choice_visible(std::string_view name, std::string_view choice) const;
+
     /// @brief The current value of @p name, or nullptr when undeclared.
     [[nodiscard]] const EvalValue* value(std::string_view name) const;
 
@@ -120,11 +125,26 @@ public:
     /// @brief Resolved visibility of a menu node.
     [[nodiscard]] bool is_menu_visible(const Menu& menu) const;
 
+    /// @brief Whether the source file holding a construct is active.  A file
+    ///        deactivated by its include gate contributes nothing that is
+    ///        referenceable, listed, or exported; the root manifest is always
+    ///        active.
+    [[nodiscard]] bool is_active_file(std::uint32_t file_id) const;
+
+    /// @brief Whether a symbol belongs to an active file.
+    [[nodiscard]] bool is_symbol_active(const Symbol& symbol) const;
+
+    /// @brief Whether a menu belongs to an active file.
+    [[nodiscard]] bool is_menu_active(const Menu& menu) const;
+
     /// @brief The declaration of @p name, or nullptr when undeclared.
     ///
     /// An alias resolves to its target: with `alias A = B`, symbol("A")
     /// returns B's declaration, through a bounded chain.
     [[nodiscard]] const Symbol* symbol(std::string_view name) const;
+
+    /// @brief Project-wide prefix for structured generated symbol names.
+    [[nodiscard]] std::string_view export_prefix() const noexcept { return document_.export_prefix; }
 
     /// @brief Expand `${NAME}` references in interface and generator text.
     /// @param[in] text text containing zero or more references
@@ -162,12 +182,28 @@ private:
                                                SourceSpan span,
                                                const Scope& scope) const;
 
+    /// @brief @p symbol() filtered by include gates (used by all expression
+    ///        and interpolation lookups).
+    [[nodiscard]] const Symbol* active_symbol(std::string_view name,
+                                              SourceSpan span,
+                                              const Scope& scope) const;
+
     [[nodiscard]] Result<EvalValue> evaluate_symbol(const Symbol& symbol, Scope& scope) const;
     [[nodiscard]] Result<EvalValue> evaluate_expr(const Expr& expr, Scope& scope) const;
     [[nodiscard]] Result<EvalValue> evaluate_call(const Expr& call, Scope& scope) const;
     [[nodiscard]] Result<EvalValue> run_probe(const std::string& kind,
                                               const std::string& argument) const;
     [[nodiscard]] Result<EvalValue> evaluate_default(const Symbol& symbol, Scope& scope) const;
+    [[nodiscard]] Result<EvalValue> validate_value(const Symbol& symbol, EvalValue value) const;
+    [[nodiscard]] Result<void> stage_assignment(const Assignment& assignment);
+    [[nodiscard]] Result<void> evaluate_in_place();
+    /// @brief Decide include-gate activeness for every loaded source file.
+    /// @note Conditions are evaluated in parse order against values computed
+    ///       on demand; a gate may reference files decided earlier, its own
+    ///       file, or the root manifest.
+    [[nodiscard]] Result<void> compute_file_gates();
+    Runtime(const Runtime& source, int);
+    void publish(Runtime& candidate);
 
     /// @brief Expand `${NAME}` inside a string value.
     ///
@@ -179,16 +215,17 @@ private:
     [[nodiscard]] Result<EvalValue> interpolate(std::string_view text,
                                                 Scope& scope,
                                                 SourceSpan span) const;
-    void resolve_visibility(const Menu& menu, bool parent_visible);
+    [[nodiscard]] Result<void> resolve_visibility(const Menu& menu, bool parent_visible);
 
     const Document& document_;
-    std::vector<Diagnostic>* diagnostics_;
 
     std::unordered_map<std::string, EvalValue> user_values_;
     mutable std::unordered_map<std::string, EvalValue> values_;
     mutable std::unordered_map<std::string, EvalValue> default_values_;
     std::unordered_map<std::string, bool> visibility_;
     std::unordered_map<const Menu*, bool> menu_visibility_;
+    std::unordered_map<std::string, bool> enabled_;
+    std::unordered_map<std::uint32_t, bool> file_gates_; ///< active load edges
     std::unordered_set<std::string> user_set_;
     mutable std::unordered_map<std::string, EvalValue> probe_cache_;
 };

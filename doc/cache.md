@@ -21,9 +21,11 @@ set arch.BOOT_PROTOCOL enum "legacy"
 
 One `set` per assignment: symbol name, declared type, quoted value.  `#`
 starts a comment.  Assignments are written in symbol order, so an unchanged
-configuration produces a byte-identical file.  Writes are atomic: a temporary
-sibling is renamed over the destination, so a reader never sees a partial
-file.  A `.lock` sibling carries the advisory lock held during saves.
+configuration produces a byte-identical file.  Writes are atomic and
+durable: bytes go to a temporary sibling, are flushed with `fsync`, and the
+temporary is renamed over the destination — a crash leaves either the
+previous contents or the complete new ones, never a partial file.  A
+`.lock` sibling carries the advisory lock held during saves.
 
 An empty or blank file reads as *absent* — clearing the cache is how you
 start over.  Lock files are never offered as presets.
@@ -70,9 +72,24 @@ and read back anywhere a value can come from:
 zxconfig --preset ci --generate          # bare names resolve through presets/
 ```
 
-In the interface, `p` opens a finder over the manifest's `presets/`
-directory; a bare name resolves `presets/<name>`, `presets/<name>.zxconfig`,
-then the manifest's own directory.  Loading a preset marks the state unsaved
+Configure search paths in the root manifest:
+
+```text
+presets_dir "profiles"
+presets_dir "vendor/profiles"
+presets_dir ""
+```
+
+Relative directories resolve against the root manifest, in declaration
+order; `""` means its directory. Explicit entries replace the default
+`presets/` search directory. Each directory tries `<name>` and
+`<name>.zxconfig`, with the manifest directory as a final fallback.
+Absolute preset paths are used directly. With no directives, the existing
+`presets/` lookup remains the default.
+
+In the interface, `p` lists `.zxconfig` files across the configured paths
+and loads the exact selected file. Missing directories are ignored; lock
+files are excluded. Loading a preset marks the state unsaved
 — it no longer matches the cache — so `s` afterwards persists it.
 
 Deprecated names migrate on every load: an assignment under an old name is

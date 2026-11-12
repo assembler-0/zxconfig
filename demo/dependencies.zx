@@ -1,0 +1,19 @@
+zxconfig 1.1
+namespace dep
+
+export macro CHAIN_STEP(current, previous) {
+    computed Chain${current} : int = Chain${previous} + 1
+    option ChainGate${current} : bool = true {
+        enabled Chain${current} >= Chain${previous}
+        visible BenchExpert
+    }
+}
+
+menu "256-hop dependency chain" {
+    computed Chain0000 : int = 0
+    # Four 64-hop segments; forward references are intentional elsewhere.
+    include "chains/segment0.zx"
+    include "chains/segment1.zx"
+    include "chains/segment2.zx"
+    include "chains/segment3.zx"
+}

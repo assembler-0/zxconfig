@@ -1,214 +1,107 @@
-zxconfig 1.0
+zxconfig 1.1
+export_with_prefix ""
+presets_dir "presets"
 
-# ZXConfig demo manifest — exercises every language feature and every
-# interface surface.  Run `zxconfig` in this directory and go.
+# ZXConfig stress laboratory.  All includes exist even when hidden.
+# Shared macros are imported before the subsystem files that invoke them.
+include "macros.zx"
 
-include "arch.zx"
-
-# ── General setup ───────────────────────────────────────────────────────
-
-menu "General setup" {
-    option EXPERT : bool = false {
-        label "Expose expert and dangerous options"
-        help  "Unhides symbols that can brick a boot. Off unless you know why."
-    }
-
-    option HOSTNAME : string = env("USER") fallback "builder" {
-        label "Build host name"
-        help  "Probed from the environment at evaluation time."
-    }
-
-    option KERNEL_VERSION : string = "6.12.0" {
-        label   "Kernel version string"
-        pattern "^\d+\.\d+\.\d+"
-    }
-
-    option BUILD_USER : string = shell("echo demo-user") fallback "builder" {
-        label "User performing the build"
-        warn  BUILD_USER == "" : "no build user could be determined"
-    }
-
-    option SYSROOT : path = "/usr/sysroot" {
-        label "Sysroot directory"
-        help  "Path constraints are enforced when you set the value."
-        path  must_exist | is_dir
-    }
-
-    option EXTRA_CFLAGS : list<string> = ["-O2", "-Wall"] {
-        label "Extra C compiler flags"
-    }
-}
-
-# ── Architecture ────────────────────────────────────────────────────────
-
-menu "Architecture" {
-    option SMP : bool = true {
-        label "Symmetric multiprocessing"
-        help  "Enable support for multiple CPU cores."
-    }
-
-    option ARCH : enum = x86_64 {
-        label   "Target architecture"
-        choices x86_64 | arm64 | riscv64
-        choice x86_64  { label "AMD64 / Intel 64" }
-        choice arm64   { label "AArch64" }
-        choice riscv64 { label "RISC-V 64"; visible EXPERT }
-    }
-
-    option NR_CPUS : int = 4 {
-        label "Max CPU count"
-        range 1 .. 512
-        when  SMP
-    }
-
-    option PAGE_SIZE : uint = 4096 {
-        label "Page size in bytes"
-        range 512 .. 65536
-    }
-
-    option BASE_ADDR : hex = 0xFFFF0000 {
-        label "Boot base address"
-    }
-
-    menu "NUMA" visible SMP {
-        option NUMA : bool = false {
-            label "Non-uniform memory access"
+menu "Stress laboratory: ${BenchProject} / ${arch.BenchTarget}" {
+    menu "Workload controls" {
+        option BenchProject : string = "zxconfig-stress" {
+            label "Project name (changes labels throughout the tree)"
+            help "Edit this value, then search for a device to see live interpolation."
+            pattern "^[A-Za-z0-9_-]+$"
+            tags ["control", "interpolation"]
         }
-        option NODES : int = 1 {
-            label   "Node count"
-            range   1 .. 64
-            enabled NUMA
-            default {
-                8 when NUMA
-                1
-            }
+        option BenchRun : bool = true {
+            label "Enable subsystem workload"
+            help "Turning this off hides the subsystem forests while retaining values."
+        }
+        option BenchExpert : bool = false {
+            label "Expose expert settings and deep nesting"
+        }
+        option BenchFastPath : bool = true { label "Global fast path" }
+        option BenchMemoryMiB : int = 8192 { range 256 .. 1048576 }
+        option BenchWorkers : int = 8 { range 1 .. 1024 }
+        option BenchChecks : set = {bounds, verify} {
+            choices bounds | trace | verify | audit
+            label "Global validation features"
+        }
+        option BenchPreempt : enum = voluntary {
+            choices none | voluntary | full | realtime
+            label "Global scheduling policy"
+        }
+        option BenchHz : int {
+            range 100 .. 2000
+            default { 1000 when BenchPreempt == full or BenchPreempt == realtime 250 }
+        }
+        option BenchKernelVersion : string = "7.0.0-stress" {
+            pattern "^[0-9]+\\.[0-9]+\\.[0-9]+"
+        }
+        option BenchSysroot : path = "." { path must_exist | is_dir }
+        option BenchCflags : list<string> = ["-O2", "-Wall", "-Wextra"]
+        option BenchAlert : bool = false {
+            label "Trigger advisory messages intentionally"
+            warn BenchAlert : "Stress warning: ${BenchProject} requested an advisory"
         }
     }
 
-    option PREEMPT_MODEL : enum = voluntary {
-        label   "Preemption model"
-        choices none | voluntary | full | realtime
-        choice none      { label "No preemption (server/HPC)" }
-        choice voluntary { label "Voluntary (desktop default)" }
-        choice full      { label "Full preemption" }
-        choice realtime  { label "PREEMPT_RT (low latency)"; visible EXPERT }
+    include "arch.zx"
+
+    menu "Host probes and derived state" {
+        computed BenchHostOs : string = HOST_OS
+        computed BenchHostArch : string = HOST_ARCH
+        computed BenchHostKernel : string = HOST_KERNEL
+        computed BenchHostNode : string = HOST_NODE
+        option BenchBuildUser : string = env("USER") fallback "builder"
+        computed BenchHostQuery : string = HOST_OS == "Linux"
+            ? shell("printf '%s' linux-query") : shell("printf '%s' portable-query")
+        computed BenchFailedProbe : string = shell("exit 1") fallback "expected-fallback"
+        computed BenchArtifact : string = "${BenchProject}-${arch.BenchTarget}"
+        computed BenchMemoryPerWorker : int = BenchMemoryMiB / BenchWorkers
+        computed BenchHasChecks : bool = contains(BenchChecks, bounds)
+        computed BenchChecksType : string = type_of(BenchChecks)
+        computed BenchLinkBase : hex = arch.BenchBaseAddress
     }
 
-    option HZ : int = 250 {
-        label "Timer frequency (Hz)"
-        range 100 .. 1000
-        default {
-            1000 when PREEMPT_MODEL == realtime
-            1000 when PREEMPT_MODEL == full
-            250
-        }
-    }
-}
-
-# ── Drivers (macros expand through the include) ─────────────────────────
-
-menu "Drivers" {
-    include "drivers.zx"
-}
-
-# ── Debug features (set: multi-select) ──────────────────────────────────
-
-menu "Debugging" {
-    option DEBUG_FEATURES : set = {kasan} {
-        label   "Debug feature flags"
-        choices lockdep | kasan | ubsan | kcsan
+    menu "Subsystem forests" visible BenchRun {
+        include "drivers.zx"
+        include "subsystems/network.zx"
+        include "subsystems/storage.zx"
+        include "subsystems/filesystems.zx"
+        include "subsystems/memory.zx"
+        include "subsystems/scheduler.zx"
+        include "subsystems/security.zx"
+        include "subsystems/virtualization.zx"
+        include "subsystems/tracing.zx"
+        include "subsystems/power.zx"
+        include "subsystems/ipc.zx"
+        include "subsystems/runtime.zx"
     }
 
-    option FORCE_PREEMPT : bool = false {
-        label   "Force full preemption"
-        visible EXPERT
-        implies PREEMPT_MODEL == full
-        conflict PREEMPT_MODEL {
-            resolve "FORCE_PREEMPT requires full preemption — override PREEMPT_MODEL?"
-        }
+    menu "Dependency and recursion laboratories" {
+        include "dependencies.zx"
+        include "recursion.zx"
+        include "deep.zx"
     }
 }
 
-# ── Computed symbols ────────────────────────────────────────────────────
+error BenchMemoryMiB < BenchWorkers * 128 : "Memory must cover workers x 128 MiB"
+error dep.Chain0256 != 256 : "The dependency chain must reach its final value"
+error recursive.RecRoot_N_N_N_N_N_N_N_N_N_N_N_NValue != 12 : "Recursive terminal is wrong"
+error BenchFailedProbe != "expected-fallback" : "Probe fallback must remain deterministic"
+warn contains(BenchChecks, audit) and not BenchExpert : "Auditing is enabled without the expert switch"
+warn BenchAlert : "Intentional global stress advisory"
 
-computed HAVE_KVM  : bool   = ARCH == x86_64 or ARCH == arm64
-computed PAGE_MASK : hex   = (PAGE_SIZE - 1) ^ 0xFFFFFFFF
-computed NPAGES    : int   = RAM_SIZE / PAGE_SIZE
-computed PREFIX    : string = "/usr/local"
-computed BIN_DIR   : string = "${PREFIX}/bin"
-computed LIB_DIR   : string = "${PREFIX}/lib/${ARCH}"
-computed MAX_IRQ : int {
-    4096 when ARCH == arm64
-    2048 when ARCH == riscv64
-    1024
+alias QuickTarget = arch.BenchTarget
+alias QuickNetwork = net.NetA_AD0Enabled
+deprecated OLD_WORKERS -> BenchWorkers {
+    message "OLD_WORKERS migrated to BenchWorkers"
 }
 
-# ── RAM sizing with cross-symbol validation ─────────────────────────────
-
-menu "Memory" {
-    option RAM_SIZE : int = 512 {
-        label "RAM in megabytes"
-        range 64 .. 65536
-    }
-
-    option THREADS : int = 8 {
-        label   "Worker threads"
-        range   1 .. 256
-        enabled SMP
-    }
-}
-
-# A manifest rule, not a host problem: this fails at the defaults on
-# purpose so the validation report has something to show.  Fix it by
-# lowering THREADS or raising RAM_SIZE.
-validate "demo rule: RAM_SIZE must cover THREADS x 128 MiB" {
-    RAM_SIZE >= THREADS * 128
-}
-
-warn "Low memory may degrade performance" {
-    RAM_SIZE >= 256
-}
-
-warn "PREEMPT_RT is experimental on this target" {
-    PREEMPT_MODEL != realtime or EXPERT
-}
-
-# ── Renames and aliases ─────────────────────────────────────────────────
-
-deprecated SLAB_DEBUG -> DEBUG_FEATURES {
-    message "SLAB_DEBUG was renamed to DEBUG_FEATURES in zxconfig 1.1"
-}
-
-alias NET_DRIVER_VIRTIO = DRV_VIRTIO_NET
-
-# ── Stress volume for scrolling ─────────────────────────────────────────
-
-menu "Kitchen sink" {
-    OPT(1) OPT(2) OPT(3) OPT(4) OPT(5) OPT(6) OPT(7) OPT(8)
-    OPT(9) OPT(10) OPT(11) OPT(12) OPT(13) OPT(14) OPT(15) OPT(16)
-    OPT(17) OPT(18) OPT(19) OPT(20) OPT(21) OPT(22) OPT(23) OPT(24)
-
-    option FLIP_ME : tristate = m {
-        label "Tristate toggle: space cycles n, m, y"
-    }
-    option EDIT_ME : int = 42 {
-        label "Integer edit: enter opens the editor"
-        range 0 .. 100
-    }
-    option PICK_ME : enum = b {
-        label   "Enum edit: enter opens the chooser"
-        choices a | b | c
-    }
-    option SET_ME : set = {x, z} {
-        label   "Set edit: enter opens the multi-select"
-        choices w | x | y | z
-    }
-}
-
-# ── Outputs ─────────────────────────────────────────────────────────────
-
-generate header   "out/config.h"
+generate header "out/config.h"
 generate makefile "out/config.mk"
-generate json     "out/config.json"
-generate cmake    "out/config.cmake"
-generate template "out/config.ld" from "linker.ld.tpl"
+generate json "out/config.json"
+generate cmake "out/config.cmake"
+generate template "out/linker.ld" from "linker.ld.tpl"

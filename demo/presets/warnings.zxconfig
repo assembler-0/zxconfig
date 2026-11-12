@@ -1,0 +1,4 @@
+zxcache 1
+set BenchAlert bool "true"
+set BenchChecks set "bounds,audit"
+set net.NetA_AD0Checks set ""

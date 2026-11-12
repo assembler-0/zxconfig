@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <regex>
+#include <limits>
 #include <sys/utsname.h>
 
 namespace zxconfig {
@@ -37,17 +38,6 @@ bool is_in(const std::vector<std::string>& choices, std::string_view item) {
     return std::find(choices.begin(), choices.end(), item) != choices.end();
 }
 
-bool is_any_choice(const Document& document, std::string_view name) {
-    for (const auto& [symbol_name, sym] : document.symbols) {
-        (void)symbol_name;
-        if ((sym->type == ValueType::Enum || sym->type == ValueType::Set)
-            && is_in(sym->meta.choices, name)) {
-            return true;
-        }
-    }
-    return false;
-}
-
 /// @brief Parse an integer literal of any integer-valued type.
 Result<std::int64_t> parse_integer(std::string_view text, ValueType type) {
     if (text.empty()) {
@@ -70,6 +60,9 @@ Result<std::int64_t> parse_integer(std::string_view text, ValueType type) {
         return std::unexpected(Diagnostic::error(
             ErrorCode::TypeMismatch,
             "'" + std::string{text} + "' is not a valid " + to_string(type)));
+    }
+    if ((type == ValueType::Uint || type == ValueType::Hex) && value < 0) {
+        return std::unexpected(Diagnostic::error(ErrorCode::TypeMismatch, "unsigned values cannot be negative"));
     }
     return value;
 }
@@ -207,7 +200,7 @@ Result<EvalValue> coerce(std::string_view text,
 std::int64_t truth_level(const EvalValue& value) {
     if (const auto* b = std::get_if<bool>(&value)) return *b ? 2 : 0;
     if (const auto* i = std::get_if<std::int64_t>(&value)) {
-        return std::clamp<std::int64_t>(*i, 0, 2);
+        return *i < 0 ? 2 : std::clamp<std::int64_t>(*i, 0, 2);
     }
     if (const auto* s = std::get_if<std::string>(&value)) return s->empty() ? 0 : 1;
     if (const auto* l = std::get_if<std::vector<std::string>>(&value)) {
@@ -217,7 +210,37 @@ std::int64_t truth_level(const EvalValue& value) {
 }
 
 Runtime::Runtime(const Document& document, std::vector<Diagnostic>* diagnostics)
-    : document_{document}, diagnostics_{diagnostics} {}
+    : document_{document} { (void)diagnostics; }
+
+Runtime::Runtime(const Runtime& source, int)
+    : document_{source.document_}, user_values_{source.user_values_},
+      file_gates_{source.file_gates_}, user_set_{source.user_set_},
+      probe_cache_{source.probe_cache_} {}
+
+void Runtime::publish(Runtime& candidate) {
+    user_values_.swap(candidate.user_values_);
+    user_set_.swap(candidate.user_set_);
+    values_.swap(candidate.values_);
+    default_values_.swap(candidate.default_values_);
+    visibility_.swap(candidate.visibility_);
+    menu_visibility_.swap(candidate.menu_visibility_);
+    enabled_.swap(candidate.enabled_);
+    file_gates_.swap(candidate.file_gates_);
+    probe_cache_.swap(candidate.probe_cache_);
+}
+
+bool Runtime::is_active_file(std::uint32_t file_id) const {
+    const auto it = file_gates_.find(file_id);
+    return it == file_gates_.end() || it->second;
+}
+
+bool Runtime::is_symbol_active(const Symbol& symbol) const {
+    return is_active_file(symbol.file_id);
+}
+
+bool Runtime::is_menu_active(const Menu& menu) const {
+    return is_active_file(menu.file_id);
+}
 
 const Symbol* Runtime::resolve_symbol(std::string_view name, SourceSpan span,
                                       const Scope& scope) const {
@@ -230,12 +253,31 @@ const Symbol* Runtime::resolve_symbol(std::string_view name, SourceSpan span,
             ns = scope.current->namespace_;
         }
         if (!ns.empty()) {
-            if (const auto* found = symbol(std::string{ns} + "." + std::string{name})) {
+            if (const auto* found = active_symbol(std::string{ns} + "." + std::string{name},
+                                                  span, scope)) {
                 return found;
             }
         }
     }
-    return symbol(name);
+    return active_symbol(name, span, scope);
+}
+
+/// @brief @p symbol(), filtered by include gates.  A symbol from a
+///        deactivated file is not referenceable from another file; the
+///        owning file and an undecided file are always referenceable.
+const Symbol* Runtime::active_symbol(std::string_view name, SourceSpan span,
+                                     const Scope& scope) const {
+    const auto* found = symbol(name);
+    if (found == nullptr) return nullptr;
+    if (scope.current != nullptr && scope.current->file_id == found->file_id) {
+        return found;  // own file
+    }
+    if (span.begin.file_id != 0 && span.begin.file_id == found->file_id) {
+        return found;  // same source (incl. include-gate conditions)
+    }
+    const auto gate = file_gates_.find(found->file_id);
+    if (gate != file_gates_.end() && !gate->second) return nullptr;
+    return found;
 }
 
 const Symbol* Runtime::symbol(std::string_view name) const {
@@ -292,10 +334,8 @@ bool Runtime::is_visible(std::string_view name) const {
 bool Runtime::is_enabled(std::string_view name) const {
     const auto* sym = symbol(name);
     if (sym == nullptr || sym->computed) return false;
-    if (sym->meta.enabled == nullptr) return true;
-    Scope scope{sym, {}};
-    auto condition = evaluate_expr(*sym->meta.enabled, scope);
-    return condition.has_value() && truth_level(*condition) != 0;
+    const auto found = enabled_.find(sym->name);
+    return found != enabled_.end() && found->second;
 }
 
 bool Runtime::is_menu_visible(const Menu& menu) const {
@@ -339,15 +379,19 @@ Result<EvalValue> Runtime::evaluate_symbol(const Symbol& symbol, Scope& scope) c
 
     auto default_result = evaluate_default(symbol, scope);
     if (!default_result) return std::unexpected(default_result.error());
-    default_values_[name] = *default_result;
+    auto checked_default = validate_value(symbol, std::move(*default_result));
+    if (!checked_default) return std::unexpected(checked_default.error());
+    default_values_[name] = *checked_default;
 
-    EvalValue value = *default_result;
+    EvalValue value = *checked_default;
     if (user_set_.count(name) != 0) {
         if (const auto it = user_values_.find(name); it != user_values_.end()) {
             value = it->second;
         }
     }
-    values_[name] = std::move(value);
+    auto checked = validate_value(symbol, std::move(value));
+    if (!checked) return std::unexpected(checked.error());
+    values_[name] = std::move(*checked);
     return values_.at(name);
 }
 
@@ -378,6 +422,83 @@ Result<EvalValue> Runtime::evaluate_default(const Symbol& symbol, Scope& scope) 
     if (chosen == nullptr) chosen = fallback;
     if (chosen == nullptr) return EvalValue{std::monostate{}};
     return evaluate_expr(*chosen, scope);
+}
+
+Result<EvalValue> Runtime::validate_value(const Symbol& symbol, EvalValue value) const {
+    const auto fail = [&](ErrorCode code, std::string message) -> Result<EvalValue> {
+        return std::unexpected(Diagnostic::error(code, "'" + symbol.name + "': " + message, symbol.span));
+    };
+    if (std::holds_alternative<std::monostate>(value)) return value;
+    auto* integer = std::get_if<std::int64_t>(&value);
+    auto* text = std::get_if<std::string>(&value);
+    auto* items = std::get_if<std::vector<std::string>>(&value);
+    switch (symbol.type) {
+        case ValueType::Bool:
+            if (integer != nullptr && *integer >= 0 && *integer <= 2) value = *integer != 0;
+            else if (!std::holds_alternative<bool>(value)) return fail(ErrorCode::TypeMismatch, "expected bool or a logical level (0..2)");
+            break;
+        case ValueType::Tristate:
+            if (const auto* boolean = std::get_if<bool>(&value)) value = std::int64_t{*boolean ? 2 : 0};
+            else if (integer == nullptr || *integer < 0 || *integer > 2) return fail(ErrorCode::TypeMismatch, "expected a tristate level (0..2)");
+            break;
+        case ValueType::Int:
+        case ValueType::Uint:
+        case ValueType::Hex:
+            if (integer == nullptr) return fail(ErrorCode::TypeMismatch, "expected an integer value");
+            if (symbol.type != ValueType::Int && *integer < 0) return fail(ErrorCode::TypeMismatch, "unsigned values cannot be negative");
+            if (symbol.meta.range && (*integer < symbol.meta.range->lo || *integer > symbol.meta.range->hi)) {
+                return fail(ErrorCode::RangeViolated, "value is outside the declared range");
+            }
+            break;
+        case ValueType::String:
+        case ValueType::Path:
+        case ValueType::Enum:
+            if (text == nullptr) return fail(ErrorCode::TypeMismatch, "expected a string or enum value");
+            if (symbol.type == ValueType::Enum && !is_in(symbol.meta.choices, *text)) {
+                return fail(ErrorCode::UnknownChoice, "value is not in the declared choices");
+            }
+            if (!symbol.meta.pattern.empty()) {
+                try {
+                    if (!std::regex_search(*text, std::regex{symbol.meta.pattern})) {
+                        return fail(ErrorCode::PatternMismatch, "value does not match the declared pattern");
+                    }
+                } catch (const std::regex_error&) {
+                    return fail(ErrorCode::PatternMismatch, "invalid regex in declaration");
+                }
+            }
+            if (symbol.type == ValueType::Path) {
+                if (text->find('\0') != std::string::npos) return fail(ErrorCode::PathConstraint, "NUL in path");
+                auto path = std::filesystem::path{*text};
+                if (path.is_relative()) path = std::filesystem::path{document_.base_directory} / path;
+                for (const auto& constraint : symbol.meta.path_constraints) {
+                    std::error_code ec;
+                    const bool accepted = constraint == "is_dir" ? std::filesystem::is_directory(path, ec)
+                                                                 : std::filesystem::exists(path, ec);
+                    if (ec || !accepted) return fail(ErrorCode::PathConstraint, "path fails " + constraint + ": " + path.string());
+                }
+            }
+            break;
+        case ValueType::Set:
+        case ValueType::List:
+            if (items == nullptr) return fail(ErrorCode::TypeMismatch, "expected a collection value");
+            if (symbol.type == ValueType::Set) {
+                for (const auto& item : *items) {
+                    if (!is_in(symbol.meta.choices, item)) return fail(ErrorCode::UnknownChoice, "unknown set member '" + item + "'");
+                }
+                // Preserve declaration/value order, but sets have unique members.
+                std::vector<std::string> unique;
+                for (const auto& item : *items) if (std::find(unique.begin(), unique.end(), item) == unique.end()) unique.push_back(item);
+                *items = std::move(unique);
+            } else {
+                for (auto& item : *items) {
+                    auto checked = coerce(item, symbol.element, symbol.meta.choices);
+                    if (!checked) return fail(checked.error().code, "invalid list element '" + item + "'");
+                    item = render_value(*checked, symbol.element);
+                }
+            }
+            break;
+    }
+    return value;
 }
 
 Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
@@ -428,7 +549,11 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
                                   : expr.text == "m" ? std::int64_t{1}
                                                      : std::int64_t{2}};
             }
-            if (is_any_choice(document_, expr.text)) return EvalValue{expr.text};
+            if (scope.current != nullptr
+                && (scope.current->type == ValueType::Enum || scope.current->type == ValueType::Set)
+                && is_in(scope.current->meta.choices, expr.text)) {
+                return EvalValue{expr.text};
+            }
 
             return std::unexpected(Diagnostic::error(
                 ErrorCode::UnknownSymbol,
@@ -455,7 +580,12 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
                             ErrorCode::UndefinedValue,
                             "arithmetic on a value that has none", expr.span));
                     }
-                    if (expr.op.kind == TokenKind::Minus) return EvalValue{-*number};
+                    if (expr.op.kind == TokenKind::Minus) {
+                        if (*number == std::numeric_limits<std::int64_t>::min()) {
+                            return std::unexpected(Diagnostic::error(ErrorCode::ArithmeticOverflow, "negation overflow", expr.span));
+                        }
+                        return EvalValue{-*number};
+                    }
                     if (expr.op.kind == TokenKind::Plus) return EvalValue{*number};
                     return EvalValue{~*number};
                 }
@@ -469,13 +599,37 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
                 return std::unexpected(Diagnostic::error(
                     ErrorCode::Invariant, "binary operator without two operands", expr.span));
             }
-            auto lhs = evaluate_expr(*expr.args[0], scope);
+            // A bare candidate in an ordered/equality comparison is a typed
+            // choice only when the directly referenced operand has an enum or
+            // set declaration containing that name. It is never inferred just
+            // because an unrelated declaration happens to use a choice name.
+            std::optional<EvalValue> typed_lhs;
+            std::optional<EvalValue> typed_rhs;
+            if (expr.op.kind == TokenKind::EqEq || expr.op.kind == TokenKind::NotEq
+                || expr.op.kind == TokenKind::Lt || expr.op.kind == TokenKind::LtEq
+                || expr.op.kind == TokenKind::Gt || expr.op.kind == TokenKind::GtEq) {
+                const Expr* const operands[] = {expr.args[0].get(), expr.args[1].get()};
+                const auto typed_choice = [&](const Expr& candidate, const Expr& typed) -> std::optional<EvalValue> {
+                    if (candidate.kind != ExprKind::Ident) return std::nullopt;
+                    if (typed.kind != ExprKind::Ident) return std::nullopt;
+                    if (resolve_symbol(candidate.text, candidate.span, scope) != nullptr) return std::nullopt;
+                    const auto* declaration = resolve_symbol(typed.text, typed.span, scope);
+                    if (declaration == nullptr
+                        || (declaration->type != ValueType::Enum && declaration->type != ValueType::Set)
+                        || !is_in(declaration->meta.choices, candidate.text)) return std::nullopt;
+                    return EvalValue{candidate.text};
+                };
+                if (auto choice = typed_choice(*operands[1], *operands[0])) typed_rhs = choice;
+                else if (auto choice = typed_choice(*operands[0], *operands[1])) typed_lhs = choice;
+            }
+
+            Result<EvalValue> lhs = typed_lhs ? std::move(*typed_lhs) : evaluate_expr(*expr.args[0], scope);
             if (!lhs) return std::unexpected(lhs.error());
             if ((expr.op.kind == TokenKind::AmpAmp || expr.op.kind == TokenKind::KwAnd)
                 && truth_level(*lhs) == 0) return EvalValue{std::int64_t{0}};
             if ((expr.op.kind == TokenKind::PipePipe || expr.op.kind == TokenKind::KwOr)
                 && truth_level(*lhs) == 2) return EvalValue{std::int64_t{2}};
-            auto rhs = evaluate_expr(*expr.args[1], scope);
+            Result<EvalValue> rhs = typed_rhs ? std::move(*typed_rhs) : evaluate_expr(*expr.args[1], scope);
             if (!rhs) return std::unexpected(rhs.error());
 
             switch (expr.op.kind) {
@@ -559,17 +713,45 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
                         return std::unexpected(Diagnostic::error(
                             ErrorCode::DivisionByZero, "division by zero", expr.span));
                     }
+                    const auto overflow = [&]() -> Result<EvalValue> {
+                        return std::unexpected(Diagnostic::error(ErrorCode::ArithmeticOverflow, "integer arithmetic overflow", expr.span));
+                    };
+                    std::int64_t checked = 0;
+                    if (expr.op.kind == TokenKind::Plus) {
+                        if (__builtin_add_overflow(*l, *r, &checked)) return overflow();
+                        return EvalValue{checked};
+                    }
+                    if (expr.op.kind == TokenKind::Minus) {
+                        if (__builtin_sub_overflow(*l, *r, &checked)) return overflow();
+                        return EvalValue{checked};
+                    }
+                    if (expr.op.kind == TokenKind::Star) {
+                        if (__builtin_mul_overflow(*l, *r, &checked)) return overflow();
+                        return EvalValue{checked};
+                    }
+                    if ((expr.op.kind == TokenKind::Slash || expr.op.kind == TokenKind::Percent)
+                        && *l == std::numeric_limits<std::int64_t>::min() && *r == -1) return overflow();
+                    if (expr.op.kind == TokenKind::Shl || expr.op.kind == TokenKind::Shr) {
+                        if (*r < 0 || *r >= 64) {
+                            return std::unexpected(Diagnostic::error(ErrorCode::InvalidShift, "shift count must be in 0..63", expr.span));
+                        }
+                        if (expr.op.kind == TokenKind::Shr) return EvalValue{*l >> *r};
+                        // Left shift is checked multiplication, including negative operands.
+                        if (*r == 63) {
+                            if (*l == 0) return EvalValue{std::int64_t{0}};
+                            if (*l == -1) return EvalValue{std::numeric_limits<std::int64_t>::min()};
+                            return overflow();
+                        }
+                        if (__builtin_mul_overflow(*l, std::int64_t{1} << *r, &checked)) return overflow();
+                        return EvalValue{checked};
+                    }
                     switch (expr.op.kind) {
-                        case TokenKind::Plus:   return EvalValue{*l + *r};
-                        case TokenKind::Minus:  return EvalValue{*l - *r};
-                        case TokenKind::Star:   return EvalValue{*l * *r};
                         case TokenKind::Slash:  return EvalValue{*l / *r};
                         case TokenKind::Percent: return EvalValue{*l % *r};
                         case TokenKind::Amp:    return EvalValue{*l & *r};
                         case TokenKind::Pipe:   return EvalValue{*l | *r};
                         case TokenKind::Caret:  return EvalValue{*l ^ *r};
-                        case TokenKind::Shl:    return EvalValue{*l << *r};
-                        default:                return EvalValue{*l >> *r};
+                        default: return std::unexpected(Diagnostic::error(ErrorCode::Invariant, "unknown arithmetic operator", expr.span));
                     }
                 }
                 default:
@@ -596,10 +778,9 @@ Result<EvalValue> Runtime::evaluate_expr(const Expr& expr, Scope& scope) const {
             // A failed probe is the one failure a fallback exists for; the
             // fallback value is used without comment.  Everything else the
             // primary produced propagates.
-            return evaluate_expr(*expr.args[0], scope)
-                .or_else([&](const Diagnostic&) {
-                    return evaluate_expr(*expr.args[1], scope);
-                });
+            auto primary = evaluate_expr(*expr.args[0], scope);
+            if (primary || primary.error().code != ErrorCode::ProbeFailed) return primary;
+            return evaluate_expr(*expr.args[1], scope);
         }
         case ExprKind::Invalid:
         default:
@@ -653,7 +834,10 @@ Result<EvalValue> Runtime::interpolate(std::string_view text,
         }
 
         if (target == nullptr) {
-            if (name == "n" || name == "m" || name == "y" || is_any_choice(document_, name)) {
+            if (name == "n" || name == "m" || name == "y"
+                || (scope.current != nullptr
+                    && (scope.current->type == ValueType::Enum || scope.current->type == ValueType::Set)
+                    && is_in(scope.current->meta.choices, name))) {
                 out.append(name);
                 at = close + 1;
                 continue;
@@ -711,6 +895,15 @@ Result<EvalValue> Runtime::evaluate_call(const Expr& call, Scope& scope) const {
         auto collection = evaluate_expr(*call.args[0], scope);
         if (!collection) return std::unexpected(collection.error());
         auto item = evaluate_expr(*call.args[1], scope);
+        if (!item && call.args[1]->is(ExprKind::Ident) && call.args[0]->is(ExprKind::Ident)) {
+            const auto* declaration = resolve_symbol(call.args[0]->text, call.args[0]->span, scope);
+            const auto& candidate = call.args[1]->text;
+            if (declaration != nullptr && declaration->type == ValueType::Set
+                && !resolve_symbol(candidate, call.args[1]->span, scope)
+                && is_in(declaration->meta.choices, candidate)) {
+                item = EvalValue{candidate};
+            }
+        }
         if (!item) return std::unexpected(item.error());
         const auto* values = std::get_if<std::vector<std::string>>(&*collection);
         const auto* text = std::get_if<std::string>(&*item);
@@ -764,8 +957,12 @@ Result<EvalValue> Runtime::evaluate_call(const Expr& call, Scope& scope) const {
         numbers.push_back(*number);
     }
 
-    if (name == "abs") return EvalValue{numbers.front() < 0 ? -numbers.front()
-                                                            : numbers.front()};
+    if (name == "abs") {
+        if (numbers.front() == std::numeric_limits<std::int64_t>::min()) {
+            return std::unexpected(Diagnostic::error(ErrorCode::ArithmeticOverflow, "abs overflow", call.span));
+        }
+        return EvalValue{numbers.front() < 0 ? -numbers.front() : numbers.front()};
+    }
     if (name == "min") return EvalValue{*std::min_element(numbers.begin(), numbers.end())};
     if (name == "max") return EvalValue{*std::max_element(numbers.begin(), numbers.end())};
     if (name == "log2") {
@@ -773,6 +970,7 @@ Result<EvalValue> Runtime::evaluate_call(const Expr& call, Scope& scope) const {
         // log2(0) is defined as 0 here; a zero-width mask is not an error the
         // user can act on.
         const auto value = numbers.front();
+        if (value < 0) return std::unexpected(Diagnostic::error(ErrorCode::TypeMismatch, "log2 requires a nonnegative integer", call.span));
         std::int64_t result = 0;
         while ((value >> result) > 1) ++result;
         return EvalValue{result};
@@ -826,14 +1024,79 @@ Result<EvalValue> Runtime::run_probe(const std::string& kind,
 }
 
 Result<void> Runtime::evaluate() {
+    Runtime candidate{*this, 0};
+    auto result = candidate.evaluate_in_place();
+    if (!result) return result;
+    publish(candidate);
+    return {};
+}
+
+Result<void> Runtime::compute_file_gates() {
+    // Decide file activeness in parse order until the include-edge fixpoint
+    // holds.  Every loaded source has at least one edge; an edge from the
+    // root manifest (parent 0) carries no dependency.  A file stays active
+    // while any pulled-in edge says so: shared includes from two parents
+    // survive when one parent is deactivated.
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto& gate : document_.include_gates) {
+            bool parent_active = true;
+            if (gate.parent_file_id != 0) {
+                const auto parent = file_gates_.find(gate.parent_file_id);
+                if (parent == file_gates_.end()) continue;  // decided later
+                parent_active = parent->second;
+            }
+            bool active = parent_active;
+            if (active && gate.condition != nullptr) {
+                Scope scope{nullptr, {}};
+                auto condition = evaluate_expr(*gate.condition, scope);
+                if (!condition) {
+                    return std::unexpected(Diagnostic::error(
+                        condition.error().code,
+                        "while deciding an include gate: "
+                            + condition.error().message,
+                        condition.error().span));
+                }
+                active = truth_level(*condition) != 0;
+            }
+            const auto current = file_gates_.find(gate.file_id);
+            if (current == file_gates_.end()) {
+                file_gates_.emplace(gate.file_id, active);
+                changed = true;
+            } else if (!current->second && active) {
+                current->second = true;
+                changed = true;
+            }
+        }
+    }
+    return {};
+}
+
+Result<void> Runtime::evaluate_in_place() {
     values_.clear();
     default_values_.clear();
     visibility_.clear();
     menu_visibility_.clear();
+    enabled_.clear();
+    file_gates_.clear();
+
+    auto gates = compute_file_gates();
+    if (!gates) return gates;
+
+    // Gate conditions are evaluated while files are still undecided, so some
+    // values of later-deactivated files were computed optimistically.  A
+    // deactivated file contributes nothing: its values are dropped and its
+    // symbols are not evaluated.
+    for (const auto* sym : declared_symbols()) {
+        if (!is_active_file(sym->file_id)) continue;
+        values_.erase(sym->name);
+        default_values_.erase(sym->name);
+    }
 
     Scope scope{nullptr, {}};
-    for (const auto& [name, sym] : document_.symbols) {
-        (void)name;
+    for (const auto* sym : declared_symbols()) {
+        if (!is_active_file(sym->file_id)) continue;
         auto value = evaluate_symbol(*sym, scope);
         if (!value) {
             return std::unexpected(Diagnostic::error(
@@ -842,36 +1105,116 @@ Result<void> Runtime::evaluate() {
         }
     }
 
-    if (document_.root != nullptr) resolve_visibility(*document_.root, true);
+    // A selection whose member is currently hidden invalidates the value: the
+    // manifest (or a dependent write staged on top of this state) fails until
+    // the selection is corrected.
+    for (const auto* sym : declared_symbols()) {
+        if (sym->type != ValueType::Enum && sym->type != ValueType::Set) continue;
+        const auto* selected_value = value(sym->name);
+        if (selected_value == nullptr) continue;
+        if (sym->type == ValueType::Enum) {
+            const auto* selected = std::get_if<std::string>(selected_value);
+            if (selected == nullptr) continue;
+            auto visible = choice_visible(sym->name, *selected);
+            if (!visible) return std::unexpected(visible.error());
+            if (!*visible) {
+                return std::unexpected(Diagnostic::error(
+                    ErrorCode::UnknownChoice,
+                    "'" + *selected + "' is hidden for '" + sym->name + "'",
+                    sym->span));
+            }
+        } else {
+            const auto* selected = std::get_if<std::vector<std::string>>(selected_value);
+            if (selected == nullptr) continue;
+            for (const auto& member : *selected) {
+                auto visible = choice_visible(sym->name, member);
+                if (!visible) return std::unexpected(visible.error());
+                if (!*visible) {
+                    return std::unexpected(Diagnostic::error(
+                        ErrorCode::UnknownChoice,
+                        "'" + member + "' is hidden for '" + sym->name + "'",
+                        sym->span));
+                }
+            }
+        }
+    }
+
+    if (document_.root != nullptr) {
+        auto visible = resolve_visibility(*document_.root, true);
+        if (!visible) return visible;
+    }
+    for (const auto* sym : declared_symbols()) {
+        if (!is_active_file(sym->file_id)) continue;
+        Scope current{sym, {}};
+        bool enabled = !sym->computed;
+        if (sym->meta.enabled) {
+            auto result = evaluate_expr(*sym->meta.enabled, current);
+            if (!result) return std::unexpected(result.error());
+            enabled = enabled && truth_level(*result) != 0;
+        }
+        enabled_[sym->name] = enabled;
+        for (const auto& choice : sym->meta.choice_meta) {
+            auto result = choice_visible(sym->name, choice.name);
+            if (!result) return std::unexpected(result.error());
+        }
+        for (const auto& clause : sym->meta.implies) {
+            if (!clause) continue;
+            auto result = evaluate_expr(*clause, current);
+            if (!result) return std::unexpected(result.error());
+        }
+    }
     return {};
 }
 
-void Runtime::resolve_visibility(const Menu& menu, bool parent_visible) {
+Result<void> Runtime::resolve_visibility(const Menu& menu, bool parent_visible) {
     bool visible = parent_visible;
     if (menu.visible != nullptr) {
         Scope scope{nullptr, {}};
         auto condition = evaluate_expr(*menu.visible, scope);
-        visible = visible && condition.has_value() && truth_level(*condition) != 0;
+        if (!condition) return std::unexpected(condition.error());
+        visible = visible && truth_level(*condition) != 0;
     }
     menu_visibility_[&menu] = visible;
 
     for (const auto& child : menu.children) {
         if (const auto* symbol_node = std::get_if<Symbol>(&child)) {
+            // A deactivated file is not listed: its symbols keep no
+            // visibility entry, which every consumer treats as invisible.
+            if (!is_active_file(symbol_node->file_id)) continue;
             bool own = visible;
             Scope scope{symbol_node, {}};
             if (symbol_node->meta.when != nullptr) {
                 auto condition = evaluate_expr(*symbol_node->meta.when, scope);
-                own = own && condition.has_value() && truth_level(*condition) != 0;
+                if (!condition) return std::unexpected(condition.error());
+                own = own && truth_level(*condition) != 0;
             }
             if (symbol_node->meta.visible != nullptr) {
                 auto condition = evaluate_expr(*symbol_node->meta.visible, scope);
-                own = own && condition.has_value() && truth_level(*condition) != 0;
+                if (!condition) return std::unexpected(condition.error());
+                own = own && truth_level(*condition) != 0;
             }
             visibility_[symbol_node->name] = own;
         } else if (const auto& sub = std::get<MenuPtr>(child)) {
-            resolve_visibility(*sub, visible);
+            // An inactive include's whole subtree is skipped.
+            if (!is_active_file(sub->file_id)) continue;
+            auto result = resolve_visibility(*sub, visible);
+            if (!result) return result;
         }
     }
+    return {};
+}
+
+Result<bool> Runtime::choice_visible(std::string_view name, std::string_view choice) const {
+    const auto* sym = symbol(name);
+    if (!sym) return std::unexpected(Diagnostic::error(ErrorCode::UnknownSymbol, std::string{name}));
+    for (const auto& meta : sym->meta.choice_meta) {
+        if (meta.name != choice || !meta.visible) continue;
+        Scope scope{sym, {}};
+        auto result = evaluate_expr(*meta.visible, scope);
+        if (!result) return std::unexpected(result.error());
+        return truth_level(*result) != 0;
+    }
+    return true;
 }
 
 std::vector<Diagnostic> Runtime::run_validation() const {
@@ -889,7 +1232,7 @@ std::vector<Diagnostic> Runtime::run_validation() const {
             findings.push_back(std::move(failure));
             return;
         }
-        if (truth_level(*result) == 0) {
+        if (truth_level(*result) != 0) {
             auto expanded = expand_text(message, {}, span);
             findings.push_back(Diagnostic{
                 ErrorCode::ConstraintViolated,
@@ -900,24 +1243,26 @@ std::vector<Diagnostic> Runtime::run_validation() const {
 
     for (const auto& clause : document_.validations) {
         if (clause.condition == nullptr) continue;
+        if (!is_active_file(clause.span.begin.file_id)) continue;
         check(clause.message, *clause.condition, clause.warning, clause.span);
     }
     for (const auto& [name, sym] : document_.symbols) {
         (void)name;
+        if (!is_active_file(sym->file_id)) continue;
         Scope scope{sym, {}};
         for (const auto& clause : sym->meta.warnings) {
             if (clause.condition == nullptr) continue;
             auto result = evaluate_expr(*clause.condition, scope);
             if (!result) {
                 auto failure = result.error();
-                failure.severity = Severity::Warning;
+                failure.severity = Severity::Error;
                 findings.push_back(std::move(failure));
                 continue;
             }
             if (truth_level(*result) != 0) {
                 auto expanded = expand_text(clause.message, sym->name);
                 findings.push_back(Diagnostic{
-                    ErrorCode::ConstraintViolated, Severity::Warning,
+                    ErrorCode::ConstraintViolated, clause.warning ? Severity::Warning : Severity::Error,
                     expanded ? *expanded : clause.message, sym->span});
             }
         }
@@ -926,8 +1271,17 @@ std::vector<Diagnostic> Runtime::run_validation() const {
 }
 
 Result<void> Runtime::set_user_value(std::string_view name,
-                                     std::string_view text,
-                                     std::optional<ValueType> claimed) {
+                                      std::string_view text,
+                                      std::optional<ValueType> claimed) {
+    const auto* declaration = symbol(name);
+    if (!declaration) return std::unexpected(Diagnostic::error(ErrorCode::UnknownSymbol, "'" + std::string{name} + "' is not declared"));
+    const Assignment assignment{std::string{name}, std::string{text}, claimed.value_or(declaration->type)};
+    return apply_assignments(std::span{&assignment, 1});
+}
+
+Result<void> Runtime::stage_assignment(const Assignment& assignment) {
+    const std::string_view name = assignment.symbol;
+    const std::string_view text = assignment.value;
     const auto* sym = symbol(name);
     if (sym == nullptr) {
         return std::unexpected(Diagnostic::error(
@@ -937,88 +1291,37 @@ Result<void> Runtime::set_user_value(std::string_view name,
         return std::unexpected(Diagnostic::error(
             ErrorCode::TypeMismatch, "'" + std::string{name} + "' is computed and read-only"));
     }
+    if (!is_active_file(sym->file_id)) {
+        return std::unexpected(Diagnostic::error(
+            ErrorCode::UnknownSymbol,
+            "'" + std::string{name}
+                + "' belongs to an inactive include and is not writable"));
+    }
 
-    if (claimed.has_value() && *claimed != sym->type) {
-        if (diagnostics_ != nullptr) {
-            diagnostics_->push_back(Diagnostic::warning(
-                ErrorCode::TypeMismatch,
-                "cache records '" + std::string{name} + "' as " + to_string(*claimed)
-                    + " but the manifest declares " + to_string(sym->type)));
-        }
+    if (assignment.type != sym->type) {
+        return std::unexpected(Diagnostic::error(ErrorCode::TypeMismatch,
+            "assignment type for '" + std::string{name} + "' differs from its declaration", sym->span));
     }
 
     auto value = coerce(text, sym->type, sym->meta.choices);
     if (!value) return std::unexpected(value.error());
 
-    if ((sym->type == ValueType::Int || sym->type == ValueType::Uint)
-        && sym->meta.range.has_value()) {
-        const auto* number = std::get_if<std::int64_t>(&*value);
-        if (number == nullptr
-            || *number < sym->meta.range->lo || *number > sym->meta.range->hi) {
-            return std::unexpected(Diagnostic::error(
-                ErrorCode::RangeViolated,
-                "'" + std::string{text} + "' is outside the range "
-                    + std::to_string(sym->meta.range->lo) + " .. "
-                    + std::to_string(sym->meta.range->hi)));
-        }
-    }
-
-    if (!sym->meta.pattern.empty()
-        && (sym->type == ValueType::String || sym->type == ValueType::Path)) {
-        try {
-            const std::regex pattern{sym->meta.pattern};
-            const std::string text_string{text};
-            if (!std::regex_search(text_string, pattern)) {
-                return std::unexpected(Diagnostic::error(
-                    ErrorCode::PatternMismatch,
-                    "'" + std::string{text} + "' does not match " + sym->meta.pattern));
-            }
-        } catch (const std::regex_error&) {
-            if (diagnostics_ != nullptr) {
-                diagnostics_->push_back(Diagnostic::warning(
-                    ErrorCode::PatternMismatch,
-                    "pattern '" + sym->meta.pattern + "' is not a valid regex; skipped"));
-            }
-        }
-    }
-
-    if (sym->type == ValueType::Path) {
-        for (const auto& constraint : sym->meta.path_constraints) {
-            const std::filesystem::path path{text};
-            std::error_code ec;
-            if (constraint == "must_exist" && !std::filesystem::exists(path, ec)) {
-                return std::unexpected(Diagnostic::error(
-                    ErrorCode::PathConstraint,
-                    "'" + std::string{text} + "' does not exist"));
-            }
-            if (constraint == "is_dir" && !std::filesystem::is_directory(path, ec)) {
-                return std::unexpected(Diagnostic::error(
-                    ErrorCode::PathConstraint,
-                    "'" + std::string{text} + "' is not a directory"));
-            }
-        }
-    }
-
-    // Store under the resolved name: an alias writes its target's slot, so
-    // the value round-trips under one canonical symbol.
-    const auto old_value = user_values_.find(sym->name);
-    const bool was_set = user_set_.contains(sym->name);
-    std::optional<EvalValue> previous;
-    if (old_value != user_values_.end()) previous = old_value->second;
-
-    user_values_[sym->name] = std::move(*value);
+    auto checked = validate_value(*sym, std::move(*value));
+    if (!checked) return std::unexpected(checked.error());
+    user_values_[sym->name] = std::move(*checked);
     user_set_.insert(sym->name);
-    if (auto evaluated = evaluate(); !evaluated) {
-        if (previous.has_value()) {
-            user_values_[sym->name] = std::move(*previous);
-        } else {
-            user_values_.erase(sym->name);
-        }
-        if (was_set) user_set_.insert(sym->name);
-        else user_set_.erase(sym->name);
-        (void)evaluate();
-        return std::unexpected(evaluated.error());
+    return {};
+}
+
+Result<void> Runtime::apply_assignments(std::span<const Assignment> assignments) {
+    Runtime candidate{*this, 0};
+    for (const auto& assignment : assignments) {
+        auto staged = candidate.stage_assignment(assignment);
+        if (!staged) return staged;
     }
+    auto evaluated = candidate.evaluate_in_place();
+    if (!evaluated) return evaluated;
+    publish(candidate);
     return {};
 }
 
@@ -1033,18 +1336,12 @@ Result<void> Runtime::reset_symbol(std::string_view name) {
             ErrorCode::TypeMismatch, "'" + std::string{name} + "' is computed and read-only"));
     }
 
-    const auto old_value = user_values_.find(sym->name);
-    const bool was_set = user_set_.contains(sym->name);
-    std::optional<EvalValue> previous;
-    if (old_value != user_values_.end()) previous = old_value->second;
-    user_set_.erase(sym->name);
-    user_values_.erase(sym->name);
-    if (auto evaluated = evaluate(); !evaluated) {
-        if (previous.has_value()) user_values_[sym->name] = std::move(*previous);
-        if (was_set) user_set_.insert(sym->name);
-        (void)evaluate();
-        return std::unexpected(evaluated.error());
-    }
+    Runtime candidate{*this, 0};
+    candidate.user_set_.erase(sym->name);
+    candidate.user_values_.erase(sym->name);
+    auto evaluated = candidate.evaluate_in_place();
+    if (!evaluated) return evaluated;
+    publish(candidate);
     return {};
 }
 

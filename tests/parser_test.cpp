@@ -29,16 +29,64 @@ const zxconfig::Symbol* find(const zxconfig::ParseResult& result, std::string_vi
 }  // namespace
 
 TEST(Parser, parses_the_version_header) {
-    auto result = parse_text("zxconfig 1.0\noption A : bool\n");
+    auto result = parse_text("zxconfig 1.1\noption A : bool\n");
     EXPECT_TRUE(result.ok());
     EXPECT_EQ(result.document.version_major, 1);
-    EXPECT_EQ(result.document.version_minor, 0);
+    EXPECT_EQ(result.document.version_minor, 1);
 }
 
-TEST(Parser, accepts_a_header_without_minor) {
+TEST(ProjectDirectives, parses_global_prefix_and_ordered_preset_paths) {
+    auto result = parse_text(R"(zxconfig 1.1
+export_with_prefix "CONFIG_"
+presets_dir "profiles"
+presets_dir "vendor/presets"
+presets_dir ""
+option Value : int = 1
+)");
+    ASSERT_TRUE(result.ok());
+    EXPECT_EQ(result.document.export_prefix, "CONFIG_");
+    EXPECT_EQ(result.document.preset_dirs,
+              (std::vector<std::string>{"profiles", "vendor/presets", ""}));
+}
+
+TEST(ProjectDirectives, rejects_duplicate_prefix_and_nonliteral_values) {
+    auto duplicate = parse_text("zxconfig 1.1\nexport_with_prefix \"\"\nexport_with_prefix \"ZX_\"\n");
+    ASSERT_FALSE(duplicate.ok());
+    EXPECT_EQ(duplicate.diagnostics.front().code, zxconfig::ErrorCode::DuplicateSymbol);
+    for (const auto text : {"9BAD", "BAD-PREFIX", "${Prefix}"}) {
+        auto invalid = parse_text("zxconfig 1.1\nexport_with_prefix \"" + std::string{text} + "\"\n");
+        EXPECT_FALSE(invalid.ok()) << text;
+    }
+    auto dynamic_path = parse_text("zxconfig 1.1\npresets_dir \"${Path}\"\n");
+    EXPECT_FALSE(dynamic_path.ok());
+}
+
+TEST(ProjectDirectives, cannot_be_hidden_inside_a_menu_or_macro) {
+    auto menu = parse_text("zxconfig 1.1\nmenu \"settings\" { presets_dir \"profiles\" }\n");
+    EXPECT_FALSE(menu.ok());
+    auto macro = parse_text("zxconfig 1.1\nmacro M() { export_with_prefix \"ZX_\" }\nM()\n");
+    EXPECT_FALSE(macro.ok());
+}
+
+TEST(ProjectDirectives, included_files_cannot_change_root_project_policy) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-project-directive-scope";
+    fs::create_directories(dir);
+    std::ofstream{dir / "root.zx"} << "zxconfig 1.1\ninclude \"child.zx\"\n";
+    std::ofstream{dir / "child.zx"} << "zxconfig 1.1\npresets_dir \"profiles\"\nexport_with_prefix \"CHILD_\"\n";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string());
+    ASSERT_TRUE(id.has_value());
+    auto result = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_FALSE(result.ok());
+    EXPECT_TRUE(result.document.export_prefix.empty());
+    EXPECT_TRUE(result.document.preset_dirs.empty());
+    fs::remove_all(dir);
+}
+
+TEST(Parser, rejects_a_header_without_minor) {
     auto result = parse_text("zxconfig 1\n");
-    EXPECT_TRUE(result.ok());
-    EXPECT_EQ(result.document.version_minor, 0);
+    EXPECT_FALSE(result.ok());
+    EXPECT_EQ(result.diagnostics.front().code, zxconfig::ErrorCode::UnsupportedVersion);
 }
 
 TEST(Parser, rejects_a_missing_header) {
@@ -55,7 +103,7 @@ TEST(Parser, rejects_a_newer_format) {
 
 TEST(Parser, parses_options_with_types) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option A : bool\n"
         "option B : tristate\n"
         "option C : int\n"
@@ -76,7 +124,7 @@ TEST(Parser, parses_options_with_types) {
 
 TEST(Parser, parses_defaults) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option A : bool = true\n"
         "option B : tristate = m\n"
         "option C : int = 4\n"
@@ -100,7 +148,7 @@ TEST(Parser, parses_defaults) {
 
 TEST(Parser, parses_binary_expression_spans_without_moving_before_reading) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option A : bool = true {\n"
         "    warn A == true : \"A is enabled\"\n"
         "}\n");
@@ -114,7 +162,7 @@ TEST(Parser, parses_binary_expression_spans_without_moving_before_reading) {
 
 TEST(Parser, parses_metadata) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option SMP : bool = false {\n"
         "    label \"Symmetric multiprocessing\"\n"
         "    help  \"Enable support for multiple CPU cores.\"\n"
@@ -148,7 +196,7 @@ TEST(Parser, parses_metadata) {
 }
 
 TEST(Parser, respects_operator_precedence) {
-    auto result = parse_text("zxconfig 1.0\ncomputed X : int = 1 + 2 * 3\n");
+    auto result = parse_text("zxconfig 1.1\ncomputed X : int = 1 + 2 * 3\n");
     ASSERT_TRUE(result.ok());
     const auto* x = find(result, "X");
     const auto& top = *x->meta.defaults.front().value;
@@ -162,7 +210,7 @@ TEST(Parser, respects_operator_precedence) {
 }
 
 TEST(Parser, folds_boolean_operators) {
-    auto result = parse_text("zxconfig 1.0\ncomputed X : bool = a && b || !c\n");
+    auto result = parse_text("zxconfig 1.1\ncomputed X : bool = a && b || !c\n");
     ASSERT_TRUE(result.ok());
     const auto& top = *find(result, "X")->meta.defaults.front().value;
     ASSERT_EQ(top.kind, ExprKind::Binary);
@@ -174,7 +222,7 @@ TEST(Parser, folds_boolean_operators) {
 
 TEST(Parser, parses_ternary_and_bitwise) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "computed X : hex = is_defined(A) ? (1 << 8) - 1 : B | 0xFF\n");
     ASSERT_TRUE(result.ok()) << result.diagnostics.front().message;
     const auto& top = *find(result, "X")->meta.defaults.front().value;
@@ -188,7 +236,7 @@ TEST(Parser, parses_ternary_and_bitwise) {
 
 TEST(Parser, parses_probe_with_fallback) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option HOSTNAME : string = shell(\"hostname\") fallback \"localhost\"\n");
     ASSERT_TRUE(result.ok());
     const auto& value = *find(result, "HOSTNAME")->meta.defaults.front().value;
@@ -200,20 +248,20 @@ TEST(Parser, parses_probe_with_fallback) {
 }
 
 TEST(Parser, rejects_an_unknown_builtin) {
-    auto result = parse_text("zxconfig 1.0\ncomputed X : int = frobnicate(1)\n");
+    auto result = parse_text("zxconfig 1.1\ncomputed X : int = frobnicate(1)\n");
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.diagnostics.front().code, zxconfig::ErrorCode::UnknownBuiltin);
 }
 
 TEST(Parser, rejects_a_wrong_arity) {
-    auto result = parse_text("zxconfig 1.0\ncomputed X : int = min(1)\n");
+    auto result = parse_text("zxconfig 1.1\ncomputed X : int = min(1)\n");
     ASSERT_FALSE(result.ok());
     EXPECT_EQ(result.diagnostics.front().code, zxconfig::ErrorCode::ArityMismatch);
 }
 
 TEST(Parser, parses_menus) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "menu \"Memory\" {\n"
         "    option A : bool\n"
         "    menu \"NUMA\" visible SMP {\n"
@@ -235,7 +283,7 @@ TEST(Parser, parses_menus) {
 
 TEST(Parser, parses_conditional_defaults) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option HZ : int {\n"
         "    default {\n"
         "        1000 when PREEMPT_MODEL == realtime\n"
@@ -253,7 +301,7 @@ TEST(Parser, parses_conditional_defaults) {
 
 TEST(Parser, parses_computed_with_branches) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "computed MAX_IRQ : int {\n"
         "    1024 when ARCH == arm64\n"
         "    512\n"
@@ -264,15 +312,11 @@ TEST(Parser, parses_computed_with_branches) {
     EXPECT_EQ(irq->meta.defaults.size(), 2u);
 }
 
-TEST(Parser, parses_validate_and_warn) {
+TEST(Parser, parses_error_and_warn_with_identical_syntax) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
-        "validate \"Insufficient memory\" {\n"
-        "    RAM_SIZE >= THREADS * 128\n"
-        "}\n"
-        "warn \"Low memory\" {\n"
-        "    RAM_SIZE >= 256\n"
-        "}\n");
+        "zxconfig 1.1\n"
+        "error RAM_SIZE < THREADS * 128 : \"Insufficient memory\"\n"
+        "warn RAM_SIZE < 256 : \"Low memory\"\n");
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.document.validations.size(), 2u);
     EXPECT_FALSE(result.document.validations[0].warning);
@@ -281,7 +325,7 @@ TEST(Parser, parses_validate_and_warn) {
 
 TEST(Parser, parses_generate_directives) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "generate header \"config.h\"\n"
         "generate makefile \"config.mk\"\n"
         "generate template \"config.ld\" from \"linker.ld.tpl\"\n");
@@ -296,7 +340,9 @@ TEST(Parser, parses_generate_directives) {
 
 TEST(Parser, parses_alias_and_deprecated) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
+        "option VIRTIO_NET : bool\n"
+        "option SLUB_DEBUG : bool\n"
         "alias NET_VIRTIO = VIRTIO_NET\n"
         "deprecated SLAB_DEBUG -> SLUB_DEBUG {\n"
         "    message \"renamed in 1.1\"\n"
@@ -310,9 +356,39 @@ TEST(Parser, parses_alias_and_deprecated) {
     EXPECT_EQ(result.document.deprecated[0].message, "renamed in 1.1");
 }
 
+TEST(Targets, resolve_declaring_file_namespace_then_global) {
+    // Reference targets follow the expression rule: the declaring file's
+    // namespace first, then global.  A deprecation's old name is a legacy
+    // cache spelling and is never validated.  (The global half of the rule
+    // is covered with real files in
+    // Targets.aliases_reach_global_symbols_from_namespaced_files.)
+    auto result = parse_text(
+        "zxconfig 1.1\n"
+        "namespace arch\n"
+        "option Local : bool\n"
+        "alias ToLocal = Local\n"
+        "deprecated LEGACY_ONLY -> Local {\n"
+        "    message \"moved\"\n"
+        "}\n");
+    ASSERT_TRUE(result.ok()) << (result.diagnostics.empty() ? "" :
+                                result.diagnostics.front().message);
+    ASSERT_EQ(result.document.aliases.size(), 1u);
+    EXPECT_EQ(result.document.aliases[0].target, "arch.Local");
+    ASSERT_EQ(result.document.deprecated.size(), 1u);
+    EXPECT_EQ(result.document.deprecated[0].old_name, "LEGACY_ONLY");
+    EXPECT_EQ(result.document.deprecated[0].new_name, "arch.Local");
+
+    auto missing = parse_text(
+        "zxconfig 1.1\n"
+        "namespace arch\n"
+        "alias Broken = Nowhere\n");
+    ASSERT_FALSE(missing.ok());
+    EXPECT_EQ(missing.diagnostics.back().code, zxconfig::ErrorCode::UnknownSymbol);
+}
+
 TEST(Parser, reports_duplicate_symbols) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option A : bool\n"
         "option A : bool\n");
     ASSERT_FALSE(result.ok());
@@ -322,7 +398,7 @@ TEST(Parser, reports_duplicate_symbols) {
 
 TEST(Parser, keeps_parsing_after_errors) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option : bool\n"
         "option B : bool\n"
         "option C : ???\n"
@@ -337,8 +413,8 @@ TEST(Parser, namespaces_included_symbols) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "net.zx"} << "zxconfig 1.0\nnamespace net\noption VIRTIO : bool\n";
-    std::ofstream{dir / "root.zx"} << "zxconfig 1.0\ninclude \"net.zx\"\n";
+    std::ofstream{dir / "net.zx"} << "zxconfig 1.1\nnamespace net\noption VIRTIO : bool\n";
+    std::ofstream{dir / "root.zx"} << "zxconfig 1.1\ninclude \"net.zx\"\n";
 
     zxconfig::SourceArena arena;
     auto root = arena.load((dir / "root.zx").string(), {}, dir.string());
@@ -357,10 +433,10 @@ TEST(Parser, namespaces_included_symbols) {
 
 TEST(Parser, namespace_belongs_to_the_file_and_as_is_rejected) {
     auto standalone = parse_text(
-        "zxconfig 1.0\nnamespace arch.cpu\noption ArTargetCpu : int = 1\n");
+        "zxconfig 1.1\nnamespace arch.cpu\noption ArTargetCpu : int = 1\n");
     ASSERT_TRUE(standalone.ok());
     EXPECT_NE(find(standalone, "arch.cpu.ArTargetCpu"), nullptr);
-    auto removed = parse_text("zxconfig 1.0\ninclude \"missing.zx\" as arch\n");
+    auto removed = parse_text("zxconfig 1.1\ninclude \"missing.zx\" as arch\n");
     ASSERT_FALSE(removed.ok());
     EXPECT_EQ(removed.diagnostics.front().code, zxconfig::ErrorCode::UnsupportedConstruct);
 }
@@ -370,9 +446,9 @@ TEST(Parser, skips_an_unnamespaced_double_include) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "leaf.zx"} << "zxconfig 1.0\noption A : bool\n";
+    std::ofstream{dir / "leaf.zx"} << "zxconfig 1.1\noption A : bool\n";
     std::ofstream{dir / "root.zx"}
-        << "zxconfig 1.0\ninclude \"leaf.zx\"\ninclude \"leaf.zx\"\n";
+        << "zxconfig 1.1\ninclude \"leaf.zx\"\ninclude \"leaf.zx\"\n";
 
     zxconfig::SourceArena arena;
     auto root = arena.load((dir / "root.zx").string(), {}, dir.string());
@@ -391,8 +467,8 @@ TEST(Parser, survives_an_include_cycle) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "a.zx"} << "zxconfig 1.0\ninclude \"b.zx\"\n";
-    std::ofstream{dir / "b.zx"} << "zxconfig 1.0\ninclude \"a.zx\"\n";
+    std::ofstream{dir / "a.zx"} << "zxconfig 1.1\ninclude \"b.zx\"\n";
+    std::ofstream{dir / "b.zx"} << "zxconfig 1.1\ninclude \"a.zx\"\n";
 
     zxconfig::SourceArena arena;
     auto root = arena.load((dir / "a.zx").string());
@@ -407,7 +483,7 @@ TEST(Parser, survives_an_include_cycle) {
 
 TEST(Parser, reports_a_missing_include) {
     zxconfig::SourceArena arena;
-    auto id = arena.add("root.zx", "zxconfig 1.0\ninclude \"no/such/file.zx\"\n");
+    auto id = arena.add("root.zx", "zxconfig 1.1\ninclude \"no/such/file.zx\"\n");
     auto result = zxconfig::parse_document(arena, *id);
 
     ASSERT_FALSE(result.ok());
@@ -419,9 +495,9 @@ TEST(Parser, folds_include_conditions) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "leaf.zx"} << "zxconfig 1.0\noption A : bool { visible B }\n";
+    std::ofstream{dir / "leaf.zx"} << "zxconfig 1.1\noption A : bool { visible B }\n";
     std::ofstream{dir / "root.zx"}
-        << "zxconfig 1.0\noption B : bool\ninclude \"leaf.zx\" visible NET\n";
+        << "zxconfig 1.1\noption B : bool\ninclude \"leaf.zx\" visible NET\n";
 
     zxconfig::SourceArena arena;
     auto root = arena.load((dir / "root.zx").string(), {}, dir.string());
@@ -443,7 +519,7 @@ TEST(Parser, folds_include_conditions) {
 
 TEST(Parser, parses_semicolon_separators) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option A : bool {\n"
         "    label \"x\"; help \"y\"; when B\n"
         "}\n");
@@ -453,7 +529,8 @@ TEST(Parser, parses_semicolon_separators) {
 
 TEST(Parser, parses_conflict_clauses) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
+        "option PREEMPT_MODEL : tristate = voluntary\n"
         "option FORCE_PREEMPT : bool = false {\n"
         "    implies PREEMPT_MODEL == full\n"
         "    conflict PREEMPT_MODEL {\n"
@@ -469,7 +546,7 @@ TEST(Parser, parses_conflict_clauses) {
 
 TEST(Parser, parses_choice_metadata) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option PREEMPT : enum = voluntary {\n"
         "    choices none | voluntary | full\n"
         "    choice voluntary { label \"Voluntary\"; visible EXPERT }\n"
@@ -485,7 +562,7 @@ TEST(Parser, parses_choice_metadata) {
 
 TEST(Parser, parses_metadata_warn) {
     auto result = parse_text(
-        "zxconfig 1.0\n"
+        "zxconfig 1.1\n"
         "option CLANG : string = shell(\"clang --version\") fallback \"\" {\n"
         "    warn CLANG == \"\" : \"clang not found\"\n"
         "}\n");
@@ -498,7 +575,7 @@ TEST(Parser, parses_metadata_warn) {
 }
 
 TEST(Macros, expand_declarations_at_the_call_site) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
 macro DRIVER(id, label_name) {
     option DRV_${id} : bool = false {
         label "${label_name} Support"
@@ -523,7 +600,7 @@ DRIVER(NVME, "Non-Volatile Memory Express")
 }
 
 TEST(Macros, substitute_expression_fragments) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
 option NET : bool = true
 export macro GUARDED(id, guard) {
     option DRV_${id} : bool = false {
@@ -541,7 +618,7 @@ GUARDED(X, NET)
 }
 
 TEST(Macros, leave_non_parameter_names_for_interpolation) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
 option PREFIX : string = "/usr"
 macro DIRS(leaf) {
     option P_${leaf} : string = "${PREFIX}/${leaf}"
@@ -559,13 +636,13 @@ DIRS(BIN)
 }
 
 TEST(Macros, reject_undeclared_calls_and_bad_arity) {
-    auto undeclared = parse_text(R"(zxconfig 1.0
+    auto undeclared = parse_text(R"(zxconfig 1.1
 NOPE(1)
 )");
     ASSERT_FALSE(undeclared.ok());
     EXPECT_EQ(undeclared.diagnostics.front().code, zxconfig::ErrorCode::UndeclaredMacro);
 
-    auto bad_arity = parse_text(R"(zxconfig 1.0
+    auto bad_arity = parse_text(R"(zxconfig 1.1
 macro ONE(a) { option X_${a} : bool }
 ONE()
 )");
@@ -574,7 +651,7 @@ ONE()
 }
 
 TEST(Macros, reject_redefinition) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
 macro M(a) { option X_${a} : bool }
 macro M(a) { option Y_${a} : bool }
 )");
@@ -582,16 +659,16 @@ macro M(a) { option Y_${a} : bool }
     EXPECT_EQ(result.diagnostics.front().code, zxconfig::ErrorCode::DuplicateSymbol);
 }
 
-TEST(Macros, export_reaches_the_includer_only) {
+TEST(Macros, private_macros_do_not_escape_the_defining_file) {
     const auto dir = fs::temp_directory_path() / "zxconfig-macro-test";
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "leaf.zx"} << R"(zxconfig 1.0
+    std::ofstream{dir / "leaf.zx"} << R"(zxconfig 1.1
 export macro OPEN(x) { option L_${x} : bool }
 macro CLOSED(y) { option C_${y} : bool }
 )";
-    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.0
+    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.1
 include "leaf.zx"
 OPEN(A)
 CLOSED(B)
@@ -615,8 +692,164 @@ CLOSED(B)
     fs::remove_all(dir);
 }
 
+TEST(Macros, exports_flow_down_includes_and_through_transitive_reexports) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-macro-transitive";
+    fs::create_directories(dir);
+    std::ofstream{dir / "utils.zx"} << R"(zxconfig 1.1
+namespace utils
+macro PRIVATE_HELPER(id) { option ${id} : bool = true }
+export macro Foo(id) { PRIVATE_HELPER(${id}) }
+)";
+    std::ofstream{dir / "wrapper.zx"} << R"(zxconfig 1.1
+include "utils.zx"
+)";
+    std::ofstream{dir / "first.zx"} << R"(zxconfig 1.1
+namespace first
+utils.Foo(First)
+)";
+    std::ofstream{dir / "second.zx"} << R"(zxconfig 1.1
+namespace second
+include "utils.zx"
+utils.Foo(Second)
+)";
+    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.1
+include "wrapper.zx"
+utils.Foo(Root)
+include "first.zx"
+include "second.zx"
+)";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string(), {}, dir.string());
+    ASSERT_TRUE(id.has_value());
+    auto result = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_TRUE(result.ok()) << (result.diagnostics.empty() ? "" : result.diagnostics.front().message);
+    EXPECT_NE(find(result, "Root"), nullptr);
+    EXPECT_NE(find(result, "first.First"), nullptr);
+    EXPECT_NE(find(result, "second.Second"), nullptr);
+    EXPECT_EQ(find(result, "utils.First"), nullptr);
+    EXPECT_EQ(result.document.symbols.size(), 3u);
+    EXPECT_EQ(result.document.macros.front().name, "utils.PRIVATE_HELPER");
+    fs::remove_all(dir);
+}
+
+TEST(Macros, helper_calls_resolve_in_the_definition_environment) {
+    // A caller may define its own macro with the same name as the wrapper's
+    // private helper.  Resolution happens where the wrapper was defined, so
+    // the definition's helper expands and the caller's shadow is ignored,
+    // while the generated symbol still lands in the caller's namespace.
+    const auto dir = fs::temp_directory_path() / "zxconfig-macro-definition-site";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::ofstream{dir / "utils.zx"} << R"(zxconfig 1.1
+namespace utils
+macro Helper(id) { option ${id} : bool = false { label "from utils" } }
+export macro Make(id) { Helper(${id}) }
+)";
+    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.1
+namespace board
+include "utils.zx"
+macro Helper(id) { option ${id} : int = 7 { label "from board" } }
+utils.Make(Flag)
+)";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string(), {}, dir.string());
+    ASSERT_TRUE(id.has_value());
+    auto result = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_TRUE(result.ok()) << (result.diagnostics.empty() ? "" :
+                                result.diagnostics.front().message);
+
+    // The definition's helper won: bool with its label, not the caller's
+    // int with the shadow's label.
+    const auto* flag = find(result, "board.Flag");
+    ASSERT_NE(flag, nullptr);
+    EXPECT_EQ(flag->type, zxconfig::ValueType::Bool);
+    EXPECT_EQ(flag->meta.label, "from utils");
+    // The caller's Helper was defined but never expanded.
+    EXPECT_EQ(result.document.symbols.size(), 1u);
+    fs::remove_all(dir);
+}
+
+TEST(Macros, private_parent_macros_are_not_inherited_by_child_files) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-macro-parent-private";
+    fs::create_directories(dir);
+    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.1
+macro PRIVATE(id) { option ${id} : bool }
+include "child.zx"
+)";
+    std::ofstream{dir / "child.zx"} << "zxconfig 1.1\nPRIVATE(Leaked)\n";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string());
+    ASSERT_TRUE(id.has_value());
+    auto result = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.diagnostics.front().code, zxconfig::ErrorCode::UndeclaredMacro);
+    fs::remove_all(dir);
+}
+
+TEST(Macros, conflicting_exports_report_an_error) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-macro-export-collision";
+    fs::create_directories(dir);
+    std::ofstream{dir / "root.zx"} << "zxconfig 1.1\ninclude \"a.zx\"\ninclude \"b.zx\"\n";
+    std::ofstream{dir / "a.zx"} << "zxconfig 1.1\nexport macro SAME(id) { option A_${id} : bool }\n";
+    std::ofstream{dir / "b.zx"} << "zxconfig 1.1\nexport macro SAME(id) { option B_${id} : bool }\n";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string());
+    ASSERT_TRUE(id.has_value());
+    auto result = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_FALSE(result.ok());
+    EXPECT_EQ(result.diagnostics.front().code, zxconfig::ErrorCode::DuplicateSymbol);
+    fs::remove_all(dir);
+}
+
+TEST(Macros, cached_imports_preserve_transitive_exports_without_redefinition) {
+    const auto dir = fs::temp_directory_path() / "zxconfig-macro-cached-import";
+    fs::create_directories(dir);
+    std::ofstream{dir / "shared.zx"} << R"(zxconfig 1.1
+namespace utils
+export macro Emit(id) { option ${id} : bool }
+)";
+    // Import the same definition directly and through an intermediate file.
+    // It must retain its identity rather than becoming a second definition.
+    std::ofstream{dir / "first.zx"} << R"(zxconfig 1.1
+include "shared.zx"
+)";
+    std::ofstream{dir / "second.zx"} << R"(zxconfig 1.1
+namespace second
+include "first.zx"
+include "shared.zx"
+utils.Emit(FromSecond)
+)";
+    std::ofstream{dir / "root.zx"} << "zxconfig 1.1\ninclude \"second.zx\"\n";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string());
+    ASSERT_TRUE(id.has_value());
+    auto result = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_TRUE(result.ok());
+    EXPECT_NE(find(result, "second.FromSecond"), nullptr);
+    EXPECT_EQ(result.document.symbols.size(), 1u);
+    fs::remove_all(dir);
+}
+
+TEST(Macros, qualified_recursive_calls_expand_and_recursion_limit_reports) {
+    auto finite = parse_text(R"(zxconfig 1.1
+namespace utils
+macro STOP(id, next) { option ${id} : bool }
+macro STEP(id, next) { ${next}(${id}_N, utils.STOP) }
+STEP(Start, utils.STEP)
+)");
+    ASSERT_TRUE(finite.ok());
+    EXPECT_NE(find(finite, "utils.Start_N_N"), nullptr);
+    auto unbounded = parse_text(R"(zxconfig 1.1
+namespace utils
+export macro LOOP(id) { utils.LOOP(${id}_N) }
+utils.LOOP(Start)
+)");
+    ASSERT_FALSE(unbounded.ok());
+    EXPECT_EQ(unbounded.diagnostics.front().code, zxconfig::ErrorCode::CircularDependency);
+}
+
 TEST(Macros, expansions_record_their_declarations) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
 macro M(a) { option X_${a} : bool }
 M(1)
 )");
@@ -634,9 +867,9 @@ TEST(Parser, parses_declarations_after_an_include) {
     fs::remove_all(dir);
     fs::create_directories(dir);
 
-    std::ofstream{dir / "leaf.zx"} << "zxconfig 1.0\noption LEAF : bool\n";
+    std::ofstream{dir / "leaf.zx"} << "zxconfig 1.1\noption LEAF : bool\n";
     std::ofstream{dir / "root.zx"}
-        << "zxconfig 1.0\ninclude \"leaf.zx\"\noption AFTER : bool\n";
+        << "zxconfig 1.1\ninclude \"leaf.zx\"\noption AFTER : bool\n";
 
     zxconfig::SourceArena arena;
     auto root = arena.load((dir / "root.zx").string(), {}, dir.string());
@@ -652,7 +885,7 @@ TEST(Parser, parses_declarations_after_an_include) {
 }
 
 TEST(PresentationOrder, order_overrides_declaration_order) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
 menu "M" {
     option A : bool
     option LATE : bool { order 99 }
@@ -673,7 +906,9 @@ menu "M" {
 }
 
 TEST(Conflicts, error_policy_parses_alongside_prompt) {
-    auto result = parse_text(R"(zxconfig 1.0
+    auto result = parse_text(R"(zxconfig 1.1
+option T : bool
+option U : bool
 option S : bool {
     conflict T { error "hard failure" }
     conflict U { resolve "soft prompt" }

@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace power
+menu "Power management" {
+    option PowerSubsystem : bool = true { enabled sched.SchedulerSubsystem }
+    menu "Power banks" visible PowerSubsystem {
+        utils.STRESS_BANK(PwrA, "Power / bank A")
+        utils.STRESS_BANK(PwrB, "Power / bank B")
+    }
+}

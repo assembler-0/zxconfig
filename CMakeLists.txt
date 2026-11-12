@@ -17,6 +17,7 @@ set(ZXCONFIG_SOURCES
     src/generator.cpp
     src/hash.cpp
     src/lexer.cpp
+    src/io.cpp
     src/log.cpp
     src/parser.cpp
     src/source.cpp
@@ -46,6 +47,7 @@ if(BUILD_TESTING)
         tests/eval_test.cpp
         tests/fuzzy_test.cpp
         tests/generator_test.cpp
+        tests/io_test.cpp
         tests/lexer_test.cpp
         tests/log_test.cpp
         tests/parser_test.cpp

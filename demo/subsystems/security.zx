@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace security
+menu "Security and isolation" {
+    option SecuritySubsystem : bool = true { enabled contains(BenchChecks, bounds) }
+    menu "Security banks" visible SecuritySubsystem {
+        utils.STRESS_BANK(SecA, "Security / bank A")
+        utils.STRESS_BANK(SecB, "Security / bank B")
+    }
+}

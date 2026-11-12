@@ -119,7 +119,7 @@ TEST(SourceArena, rejects_invalid_utf8_on_admit) {
 
 TEST(SourceArena, loads_a_file_and_deduplicates) {
     TempDir dir;
-    const auto file = dir.write("root.zx", "zxconfig 1.0\n");
+    const auto file = dir.write("root.zx", "zxconfig 1.1\n");
 
     zxconfig::SourceArena arena;
     auto first = arena.load(file.string());
@@ -157,8 +157,8 @@ TEST(SourceArena, rejects_an_empty_path) {
 
 TEST(SourceArena, confines_includes_to_the_root) {
     TempDir dir;
-    const auto inside = dir.write("sub/leaf.zx", "zxconfig 1.0\n");
-    const auto outside = dir.write("outside.zx", "zxconfig 1.0\n");
+    const auto inside = dir.write("sub/leaf.zx", "zxconfig 1.1\n");
+    const auto outside = dir.write("outside.zx", "zxconfig 1.1\n");
 
     zxconfig::SourceArena arena;
     auto escaped = arena.load("../outside.zx", inside.parent_path().string(), dir.path().string() + "/sub");

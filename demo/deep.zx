@@ -1,0 +1,15 @@
+zxconfig 1.1
+namespace deep
+
+macro DEEP_STOP(id, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) {
+    option ${id}Leaf : bool = true { label "Deep navigation terminal" }
+}
+macro DEEP_MENU(id, a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p) {
+    menu "Nested level ${id}" {
+        option ${id}Gate : bool = true
+        ${a}(${id}_N, ${b}, ${c}, ${d}, ${e}, ${f}, ${g}, ${h}, ${i}, ${j}, ${k}, ${l}, ${m}, ${n}, ${o}, ${p}, DEEP_STOP)
+    }
+}
+menu "Deep menus (16 levels)" visible BenchExpert {
+    DEEP_MENU(DeepRoot, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_MENU, DEEP_STOP)
+}

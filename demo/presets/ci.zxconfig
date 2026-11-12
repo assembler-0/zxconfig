@@ -1,7 +1,6 @@
 zxcache 1
-set SMP bool "true"
-set ARCH enum "x86_64"
-set PREEMPT_MODEL enum "voluntary"
-set RAM_SIZE int "2048"
-set THREADS int "16"
-set KERNEL_VERSION string "6.12.0"
+set BenchProject string "stress-ci"
+set BenchMemoryMiB int "16384"
+set BenchWorkers int "16"
+set BenchChecks set "bounds,verify"
+set arch.BenchTarget enum "amd64"

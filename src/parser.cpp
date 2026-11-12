@@ -76,8 +76,9 @@ bool is_statement_start(TokenKind kind) noexcept {
     switch (kind) {
         case TokenKind::KwMenu: case TokenKind::KwOption: case TokenKind::KwComputed:
         case TokenKind::KwInclude: case TokenKind::KwGenerate: case TokenKind::KwValidate:
-        case TokenKind::KwWarn: case TokenKind::KwAlias: case TokenKind::KwDeprecated:
+        case TokenKind::KwWarn: case TokenKind::KwError: case TokenKind::KwAlias: case TokenKind::KwDeprecated:
         case TokenKind::KwExport: case TokenKind::KwMacro:
+        case TokenKind::KwExportWithPrefix: case TokenKind::KwPresetsDir:
         case TokenKind::RBrace: case TokenKind::End:
             return true;
         default:
@@ -92,7 +93,7 @@ bool is_metadata_start(TokenKind kind) noexcept {
         case TokenKind::KwEnabled: case TokenKind::KwImplies: case TokenKind::KwOrder:
         case TokenKind::KwPattern: case TokenKind::KwPath: case TokenKind::KwChoices:
         case TokenKind::KwChoice: case TokenKind::KwDefault: case TokenKind::KwConflict:
-        case TokenKind::KwWarn:
+        case TokenKind::KwWarn: case TokenKind::KwError:
             return true;
         default:
             return false;
@@ -132,9 +133,25 @@ void fold_condition(const Expr& condition, ExprPtr& target) {
 }
 
 class Parser {
+    using MacroRef = std::shared_ptr<const Macro>;
+    using MacroScope = std::unordered_map<std::string, MacroRef>;
+
 public:
-    Parser(ParseResult& out, SourceArena& arena, std::string_view root)
-        : out_{out}, arena_{arena}, root_{root} {}
+    Parser(ParseResult& out, SourceArena& arena, std::string_view root,
+           std::uint32_t root_file_id)
+        : out_{out}, arena_{arena}, root_{root}, root_file_id_{root_file_id} {}
+
+    /// @brief Record one gating edge of the include graph so the runtime can
+    ///        deactivate a file whose every include edge is hidden.  The root
+    ///        manifest (parent 0) is always active, so an edge from the root
+    ///        carries no parent dependency.
+    void record_include_gate(std::uint32_t file_id, const ExprPtr& condition) {
+        IncludeGate gate;
+        gate.file_id = file_id;
+        gate.parent_file_id = file_id_ == root_file_id_ ? 0 : file_id_;
+        if (condition != nullptr) gate.condition = clone_expr(*condition);
+        out_.document.include_gates.push_back(std::move(gate));
+    }
 
     /// @brief Parse one file into @p insert.  Returns false when the file
     ///        could not be lexed or has no version header.
@@ -155,7 +172,13 @@ public:
         }
 
         parsing_.push_back(file_id);
-        macro_scopes_.emplace_back();
+        MacroScope inherited;
+        if (!macro_scopes_.empty()) {
+            for (const auto& [name, macro] : macro_scopes_.back()) {
+                if (macro->exported) inherited.emplace(name, macro);
+            }
+        }
+        macro_scopes_.push_back(std::move(inherited));
 
         struct Pop {
             Parser* p;
@@ -169,12 +192,13 @@ public:
                 p->parsing_.pop_back();
                 auto finished = std::move(p->macro_scopes_.back());
                 p->macro_scopes_.pop_back();
+                MacroScope exports;
+                for (const auto& [name, macro] : finished) {
+                    if (macro->exported) exports.emplace(name, macro);
+                }
+                p->file_macro_exports_[p->file_id_] = std::move(exports);
                 if (!p->macro_scopes_.empty()) {
-                    for (auto& [name, macro] : finished) {
-                        if (macro.exported) {
-                            p->macro_scopes_.back().emplace(name, std::move(macro));
-                        }
-                    }
+                    p->import_macros(p->file_macro_exports_.at(p->file_id_));
                 }
                 p->lexed_ = std::move(saved_lexed);
                 p->toks_ = &p->lexed_.tokens;
@@ -213,9 +237,94 @@ public:
     }
 
     /// @brief Build the symbol index and report duplicates.
-    void link() { link_menu(*out_.document.root); }
+    void link() {
+        link_menu(*out_.document.root);
+        resolve_targets();
+    }
+
+    /// @brief Canonicalize reference targets (alias, deprecation, conflict)
+    ///        with the expression rule: the declaring file's namespace first,
+    ///        then global.  Unknown targets are parse errors; a deprecation's
+    ///        old name is a legacy spelling and is never validated.
+    void resolve_targets() {
+        const auto declared = [this](const std::string& name) {
+            return out_.document.symbols.find(name) != out_.document.symbols.end();
+        };
+        const auto resolve = [&](std::string& name, SourceSpan span,
+                                 std::string_view what) {
+            // Unqualified names follow the expression rule: the declaring
+            // file's namespace first, then global.  Qualified names must
+            // exist exactly as written.
+            if (name.find('.') == std::string::npos) {
+                if (const auto file = out_.document.file_namespaces.find(span.begin.file_id);
+                    file != out_.document.file_namespaces.end() && !file->second.empty()) {
+                    auto qualified = file->second + "." + name;
+                    if (declared(qualified)) {
+                        name = std::move(qualified);
+                        return;
+                    }
+                }
+                if (declared(name)) return;
+                fail(ErrorCode::UnknownSymbol,
+                     "'" + name + "' is not declared (" + std::string{what} + ")", span);
+                return;
+            }
+            if (declared(name)) return;
+            fail(ErrorCode::UnknownSymbol,
+                 "'" + name + "' is not declared (" + std::string{what} + ")", span);
+        };
+
+        for (auto& alias : out_.document.aliases) {
+            resolve(alias.target, alias.span, "alias target");
+        }
+        for (auto& directive : out_.document.deprecated) {
+            resolve(directive.new_name, directive.span, "deprecated replacement");
+        }
+        for (auto& [name, sym] : out_.document.symbols) {
+            (void)name;
+            for (auto& clause : sym->meta.conflicts) {
+                resolve(clause.symbol, sym->span, "conflict target");
+            }
+        }
+    }
 
 private:
+    void import_macros(const MacroScope& exports) {
+        for (const auto& [name, macro] : exports) {
+            const auto [it, inserted] = macro_scopes_.back().emplace(name, macro);
+            if (!inserted && it->second != macro) {
+                fail(ErrorCode::DuplicateSymbol,
+                     "macro '" + name + "' is exported by multiple files", macro->span);
+            }
+        }
+    }
+
+    MacroRef find_macro(std::string_view name) const {
+        const auto lookup = [](const MacroScope& scope, const std::string& key) -> MacroRef {
+            const auto found = scope.find(key);
+            return found == scope.end() ? nullptr : found->second;
+        };
+        const bool qualified = name.find('.') != std::string_view::npos;
+        // Helpers and recursive calls resolve in their definition environment.
+        // This does not change the namespace of generated symbol declarations.
+        if (!expanding_macros_.empty()) {
+            const auto& definition = expanding_macros_.back();
+            const auto found = file_macro_definitions_.find(definition->span.begin.file_id);
+            if (found != file_macro_definitions_.end()) {
+                if (!qualified && !definition->namespace_.empty()) {
+                    if (auto macro = lookup(found->second, definition->namespace_ + "." + std::string{name})) {
+                        return macro;
+                    }
+                }
+                if (auto macro = lookup(found->second, std::string{name})) return macro;
+            }
+        }
+        if (!qualified && !ns_.empty()) {
+            if (auto macro = lookup(macro_scopes_.back(), ns_ + "." + std::string{name})) return macro;
+        }
+        return lookup(macro_scopes_.back(), std::string{name});
+    }
+
     std::optional<std::string> parse_name(std::string_view context) {
         if (!expect(TokenKind::Id, context)) return std::nullopt;
         std::string name{lexed_.spelling(previous())};
@@ -289,7 +398,7 @@ private:
     bool parse_header() {
         if (!check(TokenKind::KwZxconfig)) {
             fail(ErrorCode::MissingVersion,
-                 "every zxconfig file opens with a version header ('zxconfig 1.0')",
+                 "every zxconfig file opens with a version header ('zxconfig 1.1')",
                  peek().span);
             return false;
         }
@@ -325,10 +434,11 @@ private:
             advance();
         }
 
-        if (out_.document.version_major != 1) {
+        if (out_.document.version_major != 1 || out_.document.version_minor != 1) {
             fail(ErrorCode::UnsupportedVersion,
                  "zxconfig " + std::to_string(out_.document.version_major)
-                     + " is not supported; this engine reads format 1",
+                     + "." + std::to_string(out_.document.version_minor)
+                     + " is not supported; migrate to zxconfig 1.1 and warn/error CONDITION : message clauses",
                  header_span);
             return false;
         }
@@ -350,19 +460,27 @@ private:
             if (accept(TokenKind::Semicolon)) continue;
 
             switch (peek().kind) {
+                case TokenKind::KwExportWithPrefix:
+                case TokenKind::KwPresetsDir:
+                    parse_project_directive(&into == out_.document.root.get() && !in_menu);
+                    break;
                 case TokenKind::KwMenu:       parse_menu(into); break;
                 case TokenKind::KwOption:     parse_option(into); break;
                 case TokenKind::KwComputed:   parse_computed(into); break;
                 case TokenKind::KwInclude:    parse_include(into); break;
                 case TokenKind::KwGenerate:   parse_generate(); break;
-                case TokenKind::KwValidate:   parse_validate(false); break;
+                case TokenKind::KwValidate:
+                    fail(ErrorCode::UnsupportedConstruct,
+                         "validate assertions were removed in 1.1; use error BAD_CONDITION : \"message\"", peek().span);
+                    advance(); sync_statement(); break;
                 case TokenKind::KwWarn:       parse_validate(true); break;
+                case TokenKind::KwError:      parse_validate(false); break;
                 case TokenKind::KwAlias:      parse_alias(); break;
                 case TokenKind::KwDeprecated: parse_deprecated(); break;
                 case TokenKind::KwExport:
                 case TokenKind::KwMacro:      parse_macro(); break;
                 case TokenKind::Id:
-                    if (peek(1).is(TokenKind::LParen)) parse_invocation(into);
+                    if (peek(1).is(TokenKind::LParen) || peek(1).is(TokenKind::Dot)) parse_invocation(into);
                     else {
                         fail(ErrorCode::UnexpectedToken,
                              std::string{"expected a declaration or macro call, found "}
@@ -379,6 +497,43 @@ private:
                     sync_statement();
                     break;
             }
+        }
+    }
+
+    void parse_project_directive(bool at_root) {
+        const auto directive = advance();
+        const bool prefix = directive.kind == TokenKind::KwExportWithPrefix;
+        const auto keyword = prefix ? "export_with_prefix" : "presets_dir";
+        const auto value = expect(TokenKind::String, keyword);
+        if (!value) { sync_statement(); return; }
+        if (!at_root || depth_ != 0 || expansion_depth_ != 0) {
+            fail(ErrorCode::UnsupportedConstruct,
+                 std::string{keyword} + " is only allowed at the root manifest's top level", directive.span);
+            return;
+        }
+        const std::string text{lexed_.spelling(*value)};
+        if (prefix) {
+            if (export_prefix_declared_) {
+                fail(ErrorCode::DuplicateSymbol, "export_with_prefix may be declared only once", directive.span);
+                return;
+            }
+            export_prefix_declared_ = true;
+            for (std::size_t i = 0; i < text.size(); ++i) {
+                const char c = text[i];
+                const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+                if (!letter && !(i > 0 && c >= '0' && c <= '9')) {
+                    fail(ErrorCode::TypeMismatch,
+                         "export_with_prefix must be empty or match [A-Za-z_][A-Za-z0-9_]*", value->span);
+                    return;
+                }
+            }
+            out_.document.export_prefix = text;
+        } else {
+            if (text.find('\0') != std::string::npos || text.find("${") != std::string::npos) {
+                fail(ErrorCode::TypeMismatch, "presets_dir requires a literal path without NUL or interpolation", value->span);
+                return;
+            }
+            out_.document.preset_dirs.push_back(text);
         }
     }
 
@@ -508,8 +663,7 @@ private:
         return true;
     }
 
-    void parse_include(Menu& parent) {
-        const auto begin = peek().span.begin;
+    void parse_include(Menu& parent) {        const auto begin = peek().span.begin;
         advance();
 
         if (!expect(TokenKind::String, "include")) { sync_statement(); return; }
@@ -553,10 +707,15 @@ private:
 
         const bool already_loaded = arena_.count() == before;
         if (already_loaded) {
+            if (const auto exports = file_macro_exports_.find(*loaded);
+                exports != file_macro_exports_.end()) {
+                import_macros(exports->second);
+            }
             out_.diagnostics.push_back(Diagnostic::warning(
                 ErrorCode::AlreadyLoaded,
                 "'" + path + "' is included more than once; skipped",
                 directive.span));
+            record_include_gate(*loaded, condition_copy);
             out_.document.includes.push_back(std::move(directive));
             return;
         }
@@ -580,6 +739,7 @@ private:
             }
         }
         directive.namespace_ = std::move(included_namespace);
+        record_include_gate(*loaded, condition_copy);
         out_.document.includes.push_back(std::move(directive));
     }
 
@@ -618,8 +778,8 @@ private:
             directive.template_path = std::string{lexed_.spelling(previous())};
         }
 
-        // Per-backend options.  `prefix` renames the macro prefix of a
-        // header backend; unknown options are an error rather than a guess.
+        // An explicit header prefix overrides the project-wide setting.
+        // Keep explicit empty strings distinct from an inherited prefix.
         if (accept(TokenKind::LBrace)) {
             while (!check(TokenKind::RBrace) && !check(TokenKind::End)) {
                 if (accept(TokenKind::Semicolon)) continue;
@@ -627,6 +787,7 @@ private:
                     advance();
                     if (check(TokenKind::String)) {
                         directive.prefix = std::string{lexed_.spelling(peek())};
+                        directive.prefix_override = true;
                         advance();
                     } else {
                         fail(ErrorCode::ExpectedToken, "prefix: expected a string",
@@ -657,21 +818,13 @@ private:
         clause.warning = warning;
         clause.span.begin = begin;
 
-        if (!expect(TokenKind::String, warning ? "warn" : "validate")) {
+        clause.condition = parse_expression();
+        if (!clause.condition || !expect(TokenKind::Colon, warning ? "warn" : "error")
+            || !expect(TokenKind::String, warning ? "warn" : "error")) {
             sync_statement();
             return;
         }
         clause.message = std::string{lexed_.spelling(previous())};
-
-        if (!expect(TokenKind::LBrace, warning ? "warn" : "validate")) {
-            sync_statement();
-            return;
-        }
-        clause.condition = parse_expression();
-        if (!expect(TokenKind::RBrace, warning ? "warn" : "validate")) {
-            sync_statement();
-            return;
-        }
         clause.span.end = peek().span.begin;
         out_.document.validations.push_back(std::move(clause));
     }
@@ -690,7 +843,9 @@ private:
         if (!expect(TokenKind::Eq, "alias")) { sync_statement(); return; }
         auto target = parse_name("alias target");
         if (!target) { sync_statement(); return; }
-        alias.target = local_name(std::move(*target));
+        // Targets are references: kept as written and resolved with the
+        // declaring file's namespace-first rule after the whole forest parses.
+        alias.target = std::move(*target);
 
         alias.span.end = peek().span.begin;
         out_.document.aliases.push_back(std::move(alias));
@@ -705,12 +860,13 @@ private:
 
         auto old_name = parse_name("deprecated");
         if (!old_name) { sync_statement(); return; }
-        directive.old_name = local_name(std::move(*old_name));
+        // The old name is a legacy cache spelling: kept exactly as written.
+        directive.old_name = std::move(*old_name);
 
         if (!expect(TokenKind::Arrow, "deprecated")) { sync_statement(); return; }
         auto new_name = parse_name("deprecated replacement");
         if (!new_name) { sync_statement(); return; }
-        directive.new_name = local_name(std::move(*new_name));
+        directive.new_name = std::move(*new_name);
 
         if (accept(TokenKind::LBrace)) {
             while (!check(TokenKind::RBrace) && !check(TokenKind::End)) {
@@ -792,6 +948,8 @@ private:
 
         if (!expect(TokenKind::Id, "macro")) { sync_statement(); return; }
         macro.name = std::string{lexed_.spelling(previous())};
+        macro.namespace_ = ns_;
+        macro.name = local_name(std::move(macro.name));
 
         if (!expect(TokenKind::LParen, "macro")) { sync_statement(); return; }
         while (!check(TokenKind::RParen) && !check(TokenKind::End)) {
@@ -840,21 +998,29 @@ private:
             return;
         }
         out_.document.macros.push_back(macro);
-        scope.emplace(macro.name, std::move(macro));
+        auto definition = std::make_shared<const Macro>(std::move(macro));
+        scope.emplace(definition->name, definition);
+        file_macro_definitions_[definition->span.begin.file_id].emplace(definition->name, definition);
     }
 
     void parse_invocation(Menu& into) {
         const auto name_token = peek();
-        const auto name = lexed_.spelling(name_token);
-        advance();
+        auto parsed_name = parse_name("macro call");
+        if (!parsed_name) { sync_statement(); return; }
+        const auto name = std::move(*parsed_name);
 
         if (!expect(TokenKind::LParen, "macro call")) { sync_statement(); return; }
         std::vector<std::string> args;
         while (!check(TokenKind::RParen) && !check(TokenKind::End)) {
             if (accept(TokenKind::Comma)) continue;
             const auto token = peek();
-            if (token.is(TokenKind::Id) || token.is(TokenKind::Number)
-                || token.is(TokenKind::Hex) || token.is(TokenKind::String)) {
+            if (token.is(TokenKind::Id)) {
+                auto argument = parse_name("macro argument");
+                if (!argument) { sync_statement(); return; }
+                args.push_back(std::move(*argument));
+                continue;
+            }
+            if (token.is(TokenKind::Number) || token.is(TokenKind::Hex) || token.is(TokenKind::String)) {
                 args.push_back(raw_arg_text(token));
                 advance();
                 continue;
@@ -864,23 +1030,24 @@ private:
         }
         if (!expect(TokenKind::RParen, "macro call")) { sync_statement(); return; }
 
-        const auto found = macro_scopes_.back().find(std::string{name});
-        if (found == macro_scopes_.back().end()) {
+        const auto macro = find_macro(name);
+        if (macro == nullptr) {
             fail(ErrorCode::UndeclaredMacro,
                  "'" + std::string{name} + "' is not a macro in scope", name_token.span);
             return;
         }
-        const auto& macro = found->second;
-        if (macro.params.size() != args.size()) {
+        if (macro->params.size() != args.size()) {
             fail(ErrorCode::ArityMismatch,
-                 "macro '" + macro.name + "' takes " + std::to_string(macro.params.size())
+                 "macro '" + macro->name + "' takes " + std::to_string(macro->params.size())
                      + " argument(s), got " + std::to_string(args.size()),
                  name_token.span);
             return;
         }
 
-        parse_expanded(expand_body(macro, args),
+        expanding_macros_.push_back(macro);
+        parse_expanded(expand_body(*macro, args),
                        std::string{name} + "()", into, name_token.span);
+        expanding_macros_.pop_back();
     }
 
     /// @brief Parse expanded macro text as declarations into @p into.
@@ -900,6 +1067,9 @@ private:
             out_.diagnostics.push_back(admitted.error());
             return;
         }
+        // A synthetic expansion belongs to the invoking file's gate: when
+        // the invoker is deactivated, so is everything the macro declared.
+        record_include_gate(*admitted, nullptr);
 
         auto expanded = lex(arena_, *admitted);
         for (auto& failure : expanded.errors) {
@@ -1019,9 +1189,12 @@ private:
                     parse_conflict(meta);
                     break;
                 case TokenKind::KwWarn:
+                case TokenKind::KwError: {
+                    const bool warning = peek().kind == TokenKind::KwWarn;
                     advance();
-                    parse_metadata_warn(meta);
+                    parse_metadata_warn(meta, warning);
                     break;
+                }
                 default:
                     fail(ErrorCode::UnexpectedToken,
                          std::string{"expected metadata, found "} + to_string(peek().kind),
@@ -1160,7 +1333,9 @@ private:
         if (!target) { sync_metadata(); return; }
 
         ConflictClause clause;
-        clause.symbol = local_name(std::move(*target));
+        // References resolve like expressions: declaring-file namespace
+        // first, then global (decided after the whole forest parses).
+        clause.symbol = std::move(*target);
 
         if (accept(TokenKind::LBrace)) {
             while (!check(TokenKind::RBrace) && !check(TokenKind::End)) {
@@ -1174,7 +1349,7 @@ private:
                              peek().span);
                         advance();
                     }
-                } else if (check(TokenKind::Id) && lexed_.spelling(peek()) == "error") {
+                } else if (check(TokenKind::KwError)) {
                     // `error "..."` is the spec's hard-fail policy: the
                     // conflict blocks the save instead of prompting.
                     advance();
@@ -1202,14 +1377,14 @@ private:
         meta.conflicts.push_back(std::move(clause));
     }
 
-    void parse_metadata_warn(Metadata& meta) {
+    void parse_metadata_warn(Metadata& meta, bool warning) {
         auto condition = parse_expression();
         if (condition == nullptr) { sync_metadata(); return; }
         if (!expect(TokenKind::Colon, "warn")) { sync_metadata(); return; }
         if (!expect(TokenKind::String, "warn")) { sync_metadata(); return; }
 
         meta.warnings.push_back(WarnClause{
-            std::string{lexed_.spelling(previous())}, std::move(condition)});
+            std::string{lexed_.spelling(previous())}, std::move(condition), warning});
     }
 
     void parse_default_block(Metadata& meta) {
@@ -1478,6 +1653,7 @@ private:
     ParseResult& out_;
     SourceArena& arena_;
     std::string root_;
+    std::uint32_t root_file_id_{0};
     LexResult lexed_;
     const std::vector<Token>* toks_{nullptr};
     std::size_t pos_{0};
@@ -1485,8 +1661,12 @@ private:
     std::string ns_;
     std::uint32_t depth_{0};
     std::uint32_t expansion_depth_{0};
+    bool export_prefix_declared_{false};
     std::vector<std::uint32_t> parsing_;
-    std::vector<std::unordered_map<std::string, Macro>> macro_scopes_;
+    std::vector<MacroScope> macro_scopes_;
+    std::unordered_map<std::uint32_t, MacroScope> file_macro_exports_;
+    std::unordered_map<std::uint32_t, MacroScope> file_macro_definitions_;
+    std::vector<MacroRef> expanding_macros_;
     DocumentStats stats_;
 };
 
@@ -1537,7 +1717,13 @@ ParseResult parse_document(SourceArena& arena,
                            std::uint32_t file_id,
                            std::string_view root) {
     ParseResult result;
-    Parser parser{result, arena, root};
+    if (const auto* file = arena.find(file_id)) {
+        const auto path = file->canonical.empty() ? file->path : file->canonical;
+        std::error_code ec;
+        result.document.base_directory = std::filesystem::absolute(
+            std::filesystem::path{path}.parent_path().empty() ? "." : std::filesystem::path{path}.parent_path(), ec).string();
+    }
+    Parser parser{result, arena, root, file_id};
     parser.parse_file(file_id, *result.document.root, 0);
     parser.link();
     return result;

@@ -1,0 +1,6 @@
+zxconfig 1.1
+namespace s390x
+menu "S390X CPU features" {
+    option S390ChannelIo : bool = true
+    utils.STRESS_CLUSTER(S390Cpu)
+}

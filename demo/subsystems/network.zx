@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace net
+menu "Networking" {
+    option NetSubsystem : bool = true { label "Networking gate" }
+    menu "Network banks" visible NetSubsystem {
+        utils.STRESS_BANK(NetA, "Networking / bank A")
+        utils.STRESS_BANK(NetB, "Networking / bank B")
+    }
+}

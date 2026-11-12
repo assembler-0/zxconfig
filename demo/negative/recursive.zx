@@ -1,0 +1,4 @@
+zxconfig 1.1
+# Expected failure: the parser must stop at its macro expansion depth limit.
+macro FOREVER(id) { FOREVER(${id}_N) }
+FOREVER(RecursionLimit)

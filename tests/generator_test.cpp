@@ -44,7 +44,7 @@ bool has(std::string_view text, std::string_view needle) {
 }  // namespace
 
 TEST(MacroName, maps_namespaces_and_case) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option SMP : bool
 )"};
     const auto* symbol = harness.parsed.document.symbols.at("SMP");
@@ -52,7 +52,7 @@ option SMP : bool
 }
 
 TEST(MacroName, preserves_flat_declaration_spelling) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 namespace arch
 option ArTargetCpu : bool
 )"};
@@ -63,7 +63,7 @@ option ArTargetCpu : bool
 }
 
 TEST(HeaderEmission, booleans_follow_autoconf_semantics) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option ON : bool = true
 option OFF : bool = false
 generate header "config.h"
@@ -77,7 +77,7 @@ generate header "config.h"
 }
 
 TEST(HeaderEmission, tristates_emit_module_suffixed_macros) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option BUILTIN : tristate = y
 option MODULE : tristate = m
 option ABSENT : tristate = n
@@ -93,7 +93,7 @@ generate header "config.h"
 }
 
 TEST(HeaderEmission, scalars_strings_and_lists) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option CPUS : int = 4
 option BASE : hex = 0x1000
 option NAME : string = "say \"hi\"\n"
@@ -110,7 +110,7 @@ generate header "config.h"
 }
 
 TEST(HeaderEmission, enums_and_sets_emit_one_define_per_choice) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option ARCH : enum = x86_64 {
     choices x86_64 | arm64
 }
@@ -129,7 +129,7 @@ generate header "config.h"
 }
 
 TEST(HeaderEmission, honours_a_custom_prefix) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option SMP : bool = true
 generate header "config.h" { prefix "ZX_" }
 )"};
@@ -139,11 +139,63 @@ generate header "config.h" { prefix "ZX_" }
     EXPECT_FALSE(has(out, "CONFIG_"));
 }
 
+TEST(ProjectExports, global_prefix_applies_to_all_structured_backends_only) {
+    Harness harness{R"(zxconfig 1.1
+namespace arch
+export_with_prefix "ZX_"
+option ArTargetCpu : enum = s390x { choices s390x | arm64 }
+option ArEnabled : bool = true
+option ArModule : tristate = m
+generate header "config.h"
+)"};
+    ASSERT_TRUE(harness.parsed.ok());
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    auto header = zxconfig::render_header(harness.runtime, {}, "test");
+    auto makefile = zxconfig::render_makefile(harness.runtime, "test");
+    auto cmake = zxconfig::render_cmake(harness.runtime, "test");
+    auto json = zxconfig::render_json(harness.runtime, "test");
+    ASSERT_TRUE(header.has_value());
+    ASSERT_TRUE(makefile.has_value());
+    ASSERT_TRUE(cmake.has_value());
+    ASSERT_TRUE(json.has_value());
+    EXPECT_TRUE(has(*header, "#define ZX_ArTargetCpu \"s390x\""));
+    EXPECT_TRUE(has(*header, "#define ZX_ArTargetCpu_s390x 1"));
+    EXPECT_TRUE(has(*header, "#define ZX_ArModule_MODULE 1"));
+    EXPECT_TRUE(has(*makefile, "ZX_ArEnabled=y"));
+    EXPECT_TRUE(has(*cmake, "set(ZX_ArEnabled ON)"));
+    EXPECT_TRUE(has(*json, "\"ZX_ArTargetCpu\":"));
+    auto text = zxconfig::render_template(harness.runtime, "${arch.ArTargetCpu}");
+    ASSERT_TRUE(text.has_value());
+    EXPECT_EQ(*text, "s390x");
+    ASSERT_TRUE(harness.runtime.set_user_value("arch.ArTargetCpu", "arm64").has_value());
+    const auto cache = harness.runtime.to_cache("manifest", std::string(64, 'a'));
+    ASSERT_EQ(cache.assignments.size(), 1u);
+    EXPECT_EQ(cache.assignments.front().symbol, "arch.ArTargetCpu");
+}
+
+TEST(ProjectExports, explicit_empty_header_prefix_overrides_the_project_prefix) {
+    Harness harness{R"(zxconfig 1.1
+export_with_prefix "ZX_"
+option Value : int = 7
+generate header "plain.h" { prefix "" }
+generate header "custom.h" { prefix "CUSTOM_" }
+)"};
+    ASSERT_TRUE(harness.parsed.ok());
+    ASSERT_TRUE(harness.runtime.evaluate().has_value());
+    auto plain = zxconfig::render_header(harness.runtime, harness.parsed.document.generates[0], "test");
+    auto custom = zxconfig::render_header(harness.runtime, harness.parsed.document.generates[1], "test");
+    ASSERT_TRUE(plain.has_value());
+    ASSERT_TRUE(custom.has_value());
+    EXPECT_TRUE(has(*plain, "#define Value 7"));
+    EXPECT_FALSE(has(*plain, "ZX_Value"));
+    EXPECT_TRUE(has(*custom, "#define CUSTOM_Value 7"));
+}
+
 TEST(HeaderEmission, refuses_name_collisions) {
     // A choice macro and a flat symbol map to the same name: the choice
     // `A_B` of X becomes X_A_B, and so does a symbol literally named
     // `X_A_B`.  Generation must refuse rather than emit two definitions.
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option X : enum = A { choices A | A_B }
 option X_A_B : bool
 generate header "config.h"
@@ -157,7 +209,7 @@ generate header "config.h"
 }
 
 TEST(OtherBackends, refuse_flat_export_collisions_across_namespaces) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 namespace arch
 option SameName : bool = true
 )"};
@@ -173,7 +225,7 @@ option SameName : bool = true
 }
 
 TEST(OtherBackends, flat_names_and_interpolation_share_canonical_runtime_values) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 namespace arch
 option ArTargetCpu : enum = s390x { choices s390x | arm64 }
 computed ArDescription : string = "target ${ArTargetCpu} on ${HOST_OS}"
@@ -208,7 +260,7 @@ TEST(OtherBackends, output_and_template_paths_expand_in_the_defining_file_scope)
     const auto dir = fs::temp_directory_path() / "zxconfig-generator-scoped-paths";
     fs::create_directories(dir);
     std::ofstream{dir / "arm64.tpl"} << "target=${arch.Cpu}\n";
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 namespace arch
 option Cpu : string = "arm64"
 generate template "out/${Cpu}.txt" from "${Cpu}.tpl"
@@ -230,7 +282,7 @@ TEST(HeaderEmission, writes_files_deterministically) {
     std::filesystem::remove_all(dir);
     std::filesystem::create_directories(dir);
 
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option B : bool = true
 option A : int = 1
 generate header "config.h"
@@ -265,7 +317,7 @@ generate header "config.h"
 }
 
 TEST(OtherBackends, makefile_uses_kconfig_spellings) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option ON : bool = true
 option OFF : bool = false
 option MOD : tristate = m
@@ -289,7 +341,7 @@ generate makefile "config.mk"
 }
 
 TEST(OtherBackends, json_uses_native_values) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option ON : bool = true
 option MOD : tristate = m
 option CPUS : int = 4
@@ -312,7 +364,7 @@ generate json "config.json"
 }
 
 TEST(OtherBackends, cmake_uses_on_off) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option ON : bool = true
 option OFF : bool = false
 option MOD : tristate = m
@@ -330,7 +382,7 @@ generate cmake "config.cmake"
 }
 
 TEST(OtherBackends, templates_interpolate_symbols) {
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option BASE : hex = 0x1000
 option TAG : string = "v1"
 )"};
@@ -356,7 +408,7 @@ TEST(OtherBackends, run_generators_drives_every_backend) {
     std::filesystem::create_directories(dir);
     std::ofstream{dir / "linker.tpl"} << "SECTIONS { . = ${BASE}; }\n";
 
-    Harness harness{R"(zxconfig 1.0
+    Harness harness{R"(zxconfig 1.1
 option BASE : hex = 0x8000
 generate header "out/config.h"
 generate makefile "out/config.mk"
@@ -377,4 +429,46 @@ generate template "out/config.ld" from "linker.tpl"
     EXPECT_TRUE(std::filesystem::exists(dir / "out" / "config.ld"));
 
     std::filesystem::remove_all(dir);
+}
+
+TEST(Exports, deactivated_includes_export_nothing) {
+    // An inactive include is not indexed: its symbols are absent from every
+    // generated backend, and they cannot collide with export names.
+    namespace fs = std::filesystem;
+    const auto dir = fs::temp_directory_path() / "zxconfig-export-gate";
+    fs::remove_all(dir);
+    fs::create_directories(dir);
+    std::ofstream{dir / "root.zx"} << R"(zxconfig 1.1
+option Gate : bool = false
+option Root : int = 1
+include "extra.zx" visible Gate
+generate json "out/config.json"
+generate header "out/config.h"
+)";
+    std::ofstream{dir / "extra.zx"} << R"(zxconfig 1.1
+namespace extra
+option Value : int = 2
+)";
+    zxconfig::SourceArena arena;
+    auto id = arena.load((dir / "root.zx").string(), {}, dir.string());
+    ASSERT_TRUE(id.has_value());
+    auto parsed = zxconfig::parse_document(arena, *id, dir.string());
+    ASSERT_TRUE(parsed.ok());
+    ASSERT_EQ(parsed.document.symbols.count("extra.Value"), 1u);
+    zxconfig::Runtime runtime{parsed.document};
+    ASSERT_TRUE(runtime.evaluate().has_value());
+
+    auto json = zxconfig::render_json(runtime, "test");
+    ASSERT_TRUE(json.has_value());
+    EXPECT_TRUE(has(*json, "\"Root\""));
+    EXPECT_FALSE(has(*json, "\"Value\""));
+
+    // With the gate open the symbol is exported under its flat name.
+    zxconfig::Runtime active{parsed.document};
+    ASSERT_TRUE(active.set_user_value("Gate", "true").has_value());
+    auto live = zxconfig::render_json(active, "test");
+    ASSERT_TRUE(live.has_value());
+    EXPECT_TRUE(has(*live, "\"Value\": {\"type\": \"int\", \"value\": 2}"));
+
+    fs::remove_all(dir);
 }

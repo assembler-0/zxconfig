@@ -1,0 +1,9 @@
+zxconfig 1.1
+namespace storage
+menu "Block storage" {
+    option StorageSubsystem : bool = true { enabled drivers.DriverSubsystem }
+    menu "Storage banks" visible StorageSubsystem {
+        utils.STRESS_BANK(BlkA, "Storage / bank A")
+        utils.STRESS_BANK(BlkB, "Storage / bank B")
+    }
+}

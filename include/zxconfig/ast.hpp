@@ -88,6 +88,7 @@ struct ConflictClause {
 struct WarnClause {
     std::string message;
     ExprPtr condition;
+    bool warning{true};
 };
 
 /// @brief Everything an option or computed symbol carries besides its name.
@@ -146,13 +147,24 @@ struct IncludeDirective {
     SourceSpan span{};
 };
 
+/// @brief One gating edge of the include graph: the file pulled in by a
+///        parent (0 marks the root manifest, which is always active).
+///        A file with every pulled-in edge inactive is *deactivated*: its
+///        symbols are not referenceable, listed, or exported.
+struct IncludeGate {
+    std::uint32_t file_id{0};
+    std::uint32_t parent_file_id{0};  ///< 0 marks the root manifest
+    ExprPtr condition;                ///< null when unconditional
+};
+
 /// @brief One output the engine is asked to produce.
 struct GenerateDirective {
     enum class Backend : std::uint8_t { Header, Makefile, Json, Cmake, Template };
     Backend backend{Backend::Header};
     std::string output;
     std::string template_path;  ///< for Backend::Template
-    std::string prefix;         ///< optional explicit prefix for Backend::Header
+    std::string prefix;         ///< optional header override of Document::export_prefix
+    bool prefix_override{false}; ///< distinguishes an explicit empty prefix from inheritance
     SourceSpan span{};
 };
 
@@ -182,9 +194,10 @@ struct ValidationClause {
 /// @brief A macro definition captured for text-level expansion.
 struct Macro {
     std::string name;
+    std::string namespace_;  ///< namespace of the definition; expansion uses the caller's symbol scope
     std::vector<std::string> params;
     std::string body;
-    bool exported{false};  ///< visible to files that include the defining file
+    bool exported{false};  ///< inherited and re-exported through include chains
     SourceSpan span{};
 };
 
@@ -193,8 +206,12 @@ struct Macro {
 struct Document {
     std::int64_t version_major{0};
     std::int64_t version_minor{0};
+    std::string export_prefix; ///< project-wide prefix; declaration case is preserved
+    std::vector<std::string> preset_dirs; ///< ordered root-manifest-relative paths; empty vector uses presets/
+    std::string base_directory; ///< absolute directory of the root manifest
     MenuPtr root{std::make_unique<Menu>()};
     std::vector<IncludeDirective> includes;
+    std::vector<IncludeGate> include_gates; ///< gating edges in parse order
     std::vector<ValidationClause> validations;
     std::vector<GenerateDirective> generates;
     std::vector<AliasDirective> aliases;
